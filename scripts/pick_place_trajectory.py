@@ -12,14 +12,14 @@ class Demo(Node):
         self.arm_pub = self.create_publisher(JointTrajectory, '/arm_controller/joint_trajectory', 10)
         self.grip_pub = self.create_publisher(Float64MultiArray, '/gripper_controller/commands', 10)
 
-    def arm(self, name, a, w, sec=3):
+    def arm(self, name, y, a, w, sec=3):
         msg = JointTrajectory()
-        msg.joint_names = ['arm_lift_joint', 'wrist_pitch_joint']
+        msg.joint_names = ['base_yaw_joint', 'arm_lift_joint', 'wrist_pitch_joint']
         p = JointTrajectoryPoint()
-        p.positions = [a, w]
+        p.positions = [y, a, w]
         p.time_from_start = Duration(sec=sec)
         msg.points = [p]
-        self.get_logger().info(f'{name}: arm_lift={a:.2f}, wrist={w:.2f}')
+        self.get_logger().info(f'{name}: yaw={y:.2f}, arm_lift={a:.2f}, wrist={w:.2f}')
         self.arm_pub.publish(msg)
         time.sleep(sec + 0.8)
 
@@ -32,16 +32,18 @@ def main():
     rclpy.init()
     n = Demo()
     time.sleep(1.5)
+    # 注意: 这些角度是旧几何下的参考值, 新世界(桌面+偏航关节)下需要重新标定,
+    # 建议直接使用 MoveIt 版节点 pick_place_moveit, 本脚本仅用于控制器冒烟测试
     n.grip('open', 0.040)
-    n.arm('home', 0.20, 0.00, 3)
-    n.arm('above object', 0.45, -0.35, 4)
-    n.arm('down to object', 0.18, -0.50, 4)
+    n.arm('home', 0.0, 0.20, 0.00, 3)
+    n.arm('above object', 0.0, 0.45, -0.35, 4)
+    n.arm('down to object', 0.0, 0.18, -0.50, 4)
     n.grip('close on object', 0.006)
-    n.arm('lift', 0.55, -0.35, 4)
-    n.arm('place side', 0.55, 0.45, 5)
-    n.arm('place down', 0.22, 0.35, 4)
+    n.arm('lift', 0.0, 0.55, -0.35, 4)
+    n.arm('place side', 0.0, 0.55, 0.45, 5)
+    n.arm('place down', 0.0, 0.22, 0.35, 4)
     n.grip('release', 0.040)
-    n.arm('return home', 0.20, 0.00, 4)
+    n.arm('return home', 0.0, 0.20, 0.00, 4)
     n.destroy_node()
     rclpy.shutdown()
 
