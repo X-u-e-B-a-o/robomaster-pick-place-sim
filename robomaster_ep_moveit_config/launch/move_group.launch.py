@@ -18,7 +18,8 @@ def generate_launch_description():
     urdf_path = os.path.join(sim_share, 'urdf', 'robomaster_ep_gazebo.urdf')
 
     # URDF 里含 $(find ...) 和 ros2_control/gazebo 标签, 必须经 xacro 展开
-    robot_description = {'robot_description': Command(['xacro ', urdf_path])}
+    robot_description = {'robot_description': ParameterValue(
+        Command(['xacro ', urdf_path]), value_type=str)}
     robot_description_semantic = {
         'robot_description_semantic': ParameterValue(
             open(os.path.join(moveit_config_share, 'config', 'robomaster_ep.srdf')).read(),
