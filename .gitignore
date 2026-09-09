@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.bag
+*.db3
+.ros/
+build/
+install/
+log/
+.DS_Store
