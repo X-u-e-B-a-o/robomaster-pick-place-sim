@@ -34,14 +34,15 @@ from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (AllowedCollisionEntry, AttachedCollisionObject,
-                             BoundingVolume, CollisionObject, Constraints,
+                             CollisionObject, Constraints,
                              JointConstraint, MoveItErrorCodes,
-                             OrientationConstraint, PlanningScene,
-                             PositionConstraint, RobotState)
+                             PlanningScene, RobotState)
 from moveit_msgs.srv import GetCartesianPath, GetPositionFK
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Float64MultiArray, String
+
+from robomaster_pick_place_sim.robot_kinematics import solve_ik
 
 # 与 robomaster_ep_moveit_config/config/joint_limits.yaml 保持一致
 JOINT_LIMITS = {
@@ -58,10 +59,13 @@ DEFAULT_PARAMS = {
     'gripper_closed': 0.006,
     'max_velocity_scale': 0.5,
     'max_acceleration_scale': 0.5,
-    'pick_point': {'x': 0.60, 'y': 0.0, 'z': 0.337},
-    'place_point': {'x': 0.55, 'y': 0.25, 'z': 0.337},
-    'pre_pick_point': {'x': 0.545, 'y': 0.0, 'z': 0.479},
-    'pre_place_point': {'x': 0.535, 'y': 0.242, 'z': 0.42},
+    # 预设点由解析逆解+FK 校验 (见 run() 预检查):
+    #   pick/place  z=0.35 时手指近水平 (倾角 <2°), 手指箱底距桌面 3.1cm;
+    #   pre_pick/pre_place 与对应抓取点同 lift 角, 仅腕差 (纯腕部接近/撤离运动)。
+    'pick_point': {'x': 0.60, 'y': 0.0, 'z': 0.35},
+    'place_point': {'x': 0.55, 'y': 0.25, 'z': 0.35},
+    'pre_pick_point': {'x': 0.596, 'y': 0.0, 'z': 0.399},
+    'pre_place_point': {'x': 0.546, 'y': 0.248, 'z': 0.395},
     'attach_object': True,
     'object_size': 0.07,
     'table': {'center': [0.78, 0.0, 0.15], 'size': [0.80, 0.70, 0.30]},
@@ -71,6 +75,10 @@ DEFAULT_PARAMS = {
 
 EE_LINK = 'gripper_base_link'
 GROUP = 'arm'
+
+# 解析逆解运动学常量/求解器见 robomaster_pick_place_sim/robot_kinematics.py
+# (与 urdf/robomaster_ep_gazebo.urdf 一致; 改动 URDF 关节 origin 需同步,
+#  run() 预检查会用 /compute_fk 服务校验, 漂移会被 FK 误差检查拦住)
 
 
 class TaskError(Exception):
@@ -161,12 +169,15 @@ class PickPlaceNode(Node):
         self._last_js = msg
 
     def _wait_joint_states(self, timeout):
+        # 必须收到包含全部 5 个关节的完整消息 (move_group 收到空 JointState 时
+        # 会用默认状态规划, 轨迹起点错位; 内容校验可彻底排除这种情况)
+        need = set(JOINT_LIMITS.keys())
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if self._last_js is not None:
+            if self._last_js is not None and need.issubset(self._last_js.name):
                 return self._last_js
             rclpy.spin_once(self, timeout_sec=0.2)
-        raise TaskError('/joint_states 超时无消息')
+        raise TaskError('/joint_states 超时: 未收到完整的 5 个关节状态')
 
     def _current_joint_states(self):
         """取最新几帧关节状态(含夹爪真实位置)."""
@@ -234,14 +245,19 @@ class PickPlaceNode(Node):
         obj.operation = op
         return obj
 
+    def _object_center(self):
+        """物体中心: 桌面顶面 (z=0.30) 上方 5mm, 避免 attach 后与桌面
+        恰好接触 (0.30 vs 0.30) 因浮点误差被 FCL 判为穿透。"""
+        pp = self.p['pick_point']
+        return [pp['x'], pp['y'], 0.34]
+
     def _publish_scene(self):
         ps = PlanningScene()
         ps.is_diff = True
         t = self.p['table']
-        pp = self.p['pick_point']
         ps.world.collision_objects = [
             self._box_obj('table', t['center'], t['size']),
-            self._box_obj('target_object', [pp['x'], pp['y'], pp['z']],
+            self._box_obj('target_object', self._object_center(),
                           [self.p['object_size']] * 3),
         ]
         # 夹爪与目标物体之间允许接触: 手指需要框住物体侧面才能夹取,
@@ -264,9 +280,8 @@ class PickPlaceNode(Node):
         att = AttachedCollisionObject()
         att.link_name = EE_LINK
         att.touch_links = [EE_LINK, 'left_finger_link', 'right_finger_link']
-        pp = self.p['pick_point']
         att.object = self._box_obj(
-            'target_object', [pp['x'], pp['y'], pp['z']],
+            'target_object', self._object_center(),
             [self.p['object_size']] * 3,
             CollisionObject.ADD if attach else CollisionObject.REMOVE)
         ps.robot_state.attached_collision_objects = [att]
@@ -276,79 +291,62 @@ class PickPlaceNode(Node):
 
     # ================= MoveIt 原生调用 =================
 
-    @staticmethod
-    def _euler_to_quat(roll, pitch, yaw):
-        """rpy -> quaternion (xyz w 顺序)."""
-        cr, sr = math.cos(roll / 2), math.sin(roll / 2)
-        cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
-        cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
-        return [sr * cp * cy - cr * sp * sy,
-                cr * sp * cy + sr * cp * sy,
-                cr * cp * sy - sr * sp * cy,
-                cr * cp * cy + sr * sp * sy]
+    def _joint_constraint(self, joints):
+        """关节目标约束 (无路径约束 -> OMPL 自由空间规划, 稳健可靠).
 
-    def _pos_constraint(self, xyz, theta=0.0):
-        """末端位置约束 + 手指方向约束.
-
-        位置: gripper_base_link 到 xyz (BOX 0.001³ 区域)
-        姿态: gripper_base_link 的 +X 轴(手指方向)水平指向径向 (cosθ, sinθ, 0),
-              θ = atan2(y, x) 为目标的方位角; 绕 X 的滚转不敏感, 俯仰/偏航收紧,
-              保证手指水平从侧面夹取物体。
+        注: 位置+姿态路径约束对 3 自由度臂不可行 — 约束流形退化为孤立点,
+        OMPL 约束采样 (KDL IK 采样器) 几乎必然失败, 表现为
+        "Motion planning start tree could not be initialized" (error 99999)。
         """
         c = Constraints()
-        pc = PositionConstraint()
-        pc.header.frame_id = 'world'
-        pc.link_name = EE_LINK
-        pc.target_point_offset.x = xyz[0]
-        pc.target_point_offset.y = xyz[1]
-        pc.target_point_offset.z = xyz[2]
-        pc.weight = 1.0
-        bv = BoundingVolume()
-        sp = SolidPrimitive()
-        sp.type = SolidPrimitive.BOX
-        sp.dimensions = [0.001, 0.001, 0.001]
-        bv.primitives = [sp]
-        pose = Pose()
-        pose.orientation.w = 1.0
-        bv.primitive_poses = [pose]
-        pc.constraint_region = bv
-        c.position_constraints = [pc]
-
-        oc = OrientationConstraint()
-        oc.header.frame_id = 'world'
-        oc.link_name = EE_LINK
-        oc.orientation.x, oc.orientation.y, oc.orientation.z, oc.orientation.w = \
-            self._euler_to_quat(0.0, 0.0, theta)
-        oc.absolute_x_axis_tolerance = 0.5    # 手指滚转: 无影响, 放宽
-        oc.absolute_y_axis_tolerance = 0.12   # 手指俯仰: 收紧
-        oc.absolute_z_axis_tolerance = 0.12   # 手指偏航: 收紧
-        oc.weight = 1.0
-        c.orientation_constraints = [oc]
+        c.joint_constraints = []
+        for name, value in zip(('base_yaw_joint', 'arm_lift_joint',
+                                'wrist_pitch_joint'), joints):
+            jc = JointConstraint()
+            jc.joint_name = name
+            jc.position = value
+            jc.tolerance_above = 0.01
+            jc.tolerance_below = 0.01
+            jc.weight = 1.0
+            c.joint_constraints.append(jc)
         return c
 
-    def _home_constraint(self):
-        """从 SRDF 读取 home 位姿并转成关节约束."""
+    def _home_joints(self):
+        """从 SRDF 读取 home 位姿 [yaw, lift, wrist]."""
         srdf = os.path.join(
             get_package_share_directory('robomaster_ep_moveit_config'),
             'config', 'robomaster_ep.srdf')
         tree = ET.parse(srdf)
         for gs in tree.getroot().findall('group_state'):
             if gs.get('name') == 'home':
-                c = Constraints()
-                c.joint_constraints = []
-                for j in gs.findall('joint'):
-                    jc = JointConstraint()
-                    jc.joint_name = j.get('name')
-                    jc.position = float(j.get('value'))
-                    jc.tolerance_above = 0.001
-                    jc.tolerance_below = 0.001
-                    jc.weight = 1.0
-                    c.joint_constraints.append(jc)
-                return c
+                vals = {j.get('name'): float(j.get('value'))
+                        for j in gs.findall('joint')}
+                return [vals['base_yaw_joint'], vals['arm_lift_joint'],
+                        vals['wrist_pitch_joint']]
         raise TaskError('SRDF 中找不到 home 位姿')
 
-    def _mg_call(self, constraints, plan_only, label, timeout=180.0):
-        """通过 /move_action 规划(或规划并执行), 返回 MoveGroup.Result."""
+    def _home_constraint(self):
+        c = Constraints()
+        c.joint_constraints = []
+        for name, value in zip(('base_yaw_joint', 'arm_lift_joint',
+                                'wrist_pitch_joint'), self._home_joints()):
+            jc = JointConstraint()
+            jc.joint_name = name
+            jc.position = value
+            jc.tolerance_above = 0.001
+            jc.tolerance_below = 0.001
+            jc.weight = 1.0
+            c.joint_constraints.append(jc)
+        return c
+
+    def _mg_call(self, constraints, plan_only, label, timeout=180.0,
+                 start_joints=None):
+        """通过 /move_action 规划(或规划并执行), 返回 MoveGroup.Result.
+
+        start_joints: 显式规划起点 [yaw, lift, wrist] (预检查预演用, 机器人
+        并未真正运动到各中间点, 不能依赖 move_group 的当前监视状态);
+        为 None 时用空 diff 表示"从当前状态规划" (实际执行用)。
+        """
         goal = MoveGroup.Goal()
         goal.request.group_name = GROUP
         goal.request.goal_constraints = [constraints]
@@ -358,7 +356,14 @@ class PickPlaceNode(Node):
         goal.request.max_acceleration_scaling_factor = float(self.p['max_acceleration_scale'])
         goal.planning_options.plan_only = plan_only
         goal.planning_options.planning_scene_diff.is_diff = True
-        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
+        if start_joints is not None:
+            rs = RobotState()
+            rs.joint_state.name = ['base_yaw_joint', 'arm_lift_joint',
+                                   'wrist_pitch_joint']
+            rs.joint_state.position = [float(v) for v in start_joints]
+            goal.request.start_state = rs
+        else:
+            goal.planning_options.planning_scene_diff.robot_state.is_diff = True
         fut = self.mg_cli.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
         if not fut.done() or fut.result() is None or not fut.result().accepted:
@@ -371,11 +376,21 @@ class PickPlaceNode(Node):
 
     def _fk_pose(self):
         """当前末端位姿 (空 robot_state 表示用 move_group 的当前状态)."""
+        return self._fk_for_joints(None)
+
+    def _fk_for_joints(self, joints):
+        """给定臂关节值 [yaw, lift, wrist] 求末端位姿; joints=None 用当前状态.
+        (预检查用它校验解析逆解与 URDF 运动学一致, 防止常量漂移)."""
         req = GetPositionFK.Request()
         req.header.frame_id = 'world'
         req.header.stamp = self.get_clock().now().to_msg()
         req.fk_link_names = [EE_LINK]
         req.robot_state = RobotState()
+        if joints is not None:
+            req.robot_state.joint_state.name = ['base_yaw_joint',
+                                                'arm_lift_joint',
+                                                'wrist_pitch_joint']
+            req.robot_state.joint_state.position = [float(v) for v in joints]
         fut = self.fk_cli.call_async(req)
         rclpy.spin_until_future_complete(self, fut, timeout_sec=5.0)
         if not fut.done() or fut.result() is None:
@@ -419,14 +434,26 @@ class PickPlaceNode(Node):
                                     f'({value:.3f} 超出 [{lo}, {hi}])')
 
     def go_to_pos(self, pos, label, theta=0.0):
-        """关节空间规划到指定末端位置 (位置 IK + 手指方向约束)."""
-        res = self._mg_call(self._pos_constraint(pos, theta), False, label)
+        """解析逆解 -> 关节目标自由空间规划 -> 轨迹执行 (theta 仅作兼容保留).
+
+        手指方向由逆解的 psi2 约束保证: 近似水平、指向径向, 从侧面夹取物体。
+        """
+        sol = solve_ik(pos)
+        if sol is None:
+            raise TaskError(
+                f'{label}: 目标 {pos} 无逆解 (不可达/关节超限/手指姿态不可行), '
+                f'请用 calibrate_pose 重新标定')
+        yaw, lift, wrist, tilt = sol
+        res = self._mg_call(self._joint_constraint([yaw, lift, wrist]), False, label)
         if res.error_code.val != MoveItErrorCodes.SUCCESS:
-            raise TaskError(f'{label}: 规划失败/无逆解 (error code={res.error_code.val}), '
-                            f'目标 {pos} 不可达或与障碍碰撞')
+            raise TaskError(f'{label}: 规划失败 (error code={res.error_code.val}), '
+                            f'目标 {pos} 逆解 ({yaw:.3f}, {lift:.3f}, {wrist:.3f}) '
+                            f'与障碍碰撞或路径不存在')
         self._check_limits(label)
         self._record(label, True)
-        self.log(f'{label}: 到达 ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})')
+        self.log(f'{label}: 到达 ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) '
+                 f'[joints {yaw:.3f}/{lift:.3f}/{wrist:.3f}, '
+                 f'手指倾角 {math.degrees(tilt):.1f}°]')
 
     def grip(self, value, label):
         self.grip_pub.publish(Float64MultiArray(data=[float(value), float(value)]))
@@ -530,19 +557,57 @@ class PickPlaceNode(Node):
             self.log('警告: 回零也失败, 机械臂已停止', 'error')
 
     def run(self):
-        # 启动前可达性预检查: A/B 两点都规划不通就整体中止
-        for name in ('pick_point', 'place_point'):
+        # 启动前预检查, 分两层:
+        # 1) 解析逆解 + FK 一致性校验 (逆解-URDF 漂移、不可达、限位、手指姿态)
+        # 2) 整个循环全部 7 段关节轨迹的 plan-only 预演 (起点显式给定),
+        #    碰撞/无路径在正式开始前全部暴露
+        home = self._home_joints()
+        sols = {}
+        for name in ('pick_point', 'place_point', 'pre_pick_point',
+                     'pre_place_point'):
             pos = self.p[name]
             xyz = [pos['x'], pos['y'], pos['z']]
-            res = self._mg_call(self._pos_constraint(xyz), True,
-                                f'{name} 可达性预检查')
-            if res.error_code.val != MoveItErrorCodes.SUCCESS:
-                self.log(f'错误: {name} {xyz} 不可达/无逆解 '
-                         f'(error code={res.error_code.val}), '
-                         f'任务中止, 请用 calibrate_pose 重新标定', 'error')
+            sol = solve_ik(xyz)
+            if sol is None:
+                self.log(f'错误: {name} {xyz} 无逆解 (不可达/关节超限/'
+                         f'手指姿态不可行), 任务中止, 请用 calibrate_pose 重新标定',
+                         'error')
                 self._stop_safe(f'{name} 不可达')
                 return 1
-            self.log(f'可达性检查通过: {name} {xyz}')
+            pose = self._fk_for_joints(sol[:3])
+            err = math.hypot(pose.position.x - xyz[0],
+                             pose.position.y - xyz[1],
+                             pose.position.z - xyz[2])
+            if err > 0.005:
+                self.log(f'错误: {name} 逆解 FK 误差 {err * 1000:.1f}mm, '
+                         f'解析模型与 URDF 不一致', 'error')
+                self._stop_safe('FK 校验失败')
+                return 1
+            sols[name] = sol
+            self.log(f'可达性检查通过: {name} {xyz} -> joints '
+                     f'({sol[0]:.3f}, {sol[1]:.3f}, {sol[2]:.3f}), '
+                     f'手指倾角 {math.degrees(sol[3]):.1f}°')
+
+        cycle_seq = [('home', home),
+                     ('pre_pick_point', sols['pre_pick_point']),
+                     ('pick_point', sols['pick_point']),
+                     ('pre_pick_point', sols['pre_pick_point']),
+                     ('pre_place_point', sols['pre_place_point']),
+                     ('place_point', sols['place_point']),
+                     ('pre_place_point', sols['pre_place_point']),
+                     ('home', home)]
+        prev = cycle_seq[0]
+        for name, js in cycle_seq[1:]:
+            res = self._mg_call(self._joint_constraint(js[:3]), True,
+                                f'{name} 路径预演', start_joints=prev[1][:3])
+            if res.error_code.val != MoveItErrorCodes.SUCCESS:
+                self.log(f'错误: {prev[0]} -> {name} 规划失败 '
+                         f'(error code={res.error_code.val}), 路径碰撞或不存在, '
+                         f'任务中止, 请用 calibrate_pose 重新标定', 'error')
+                self._stop_safe(f'{prev[0]}->{name} 规划失败')
+                return 1
+            prev = (name, js)
+        self.log('整循环路径预演通过 (7/7 段)')
 
         self.status('开始连续抓取实验')
         for i in range(1, self.p['num_cycles'] + 1):

@@ -17,11 +17,12 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Pose
 from moveit_msgs.action import MoveGroup
-from moveit_msgs.msg import (BoundingVolume, Constraints, MoveItErrorCodes,
-                             PositionConstraint, RobotState)
+from moveit_msgs.msg import (Constraints, JointConstraint, MoveItErrorCodes,
+                             RobotState)
 from moveit_msgs.srv import GetPositionFK
 from sensor_msgs.msg import JointState
-from shape_msgs.msg import SolidPrimitive
+
+from robomaster_pick_place_sim.robot_kinematics import solve_ik
 
 EE_LINK = 'gripper_base_link'
 ARM_JOINTS = ['base_yaw_joint', 'arm_lift_joint', 'wrist_pitch_joint']
@@ -44,32 +45,24 @@ class CalibrateNode(Node):
     def _js_cb(self, msg):
         self._last_js = msg
 
-    def _pos_constraint(self, x, y, z):
-        c = Constraints()
-        pc = PositionConstraint()
-        pc.header.frame_id = 'world'
-        pc.link_name = EE_LINK
-        pc.target_point_offset.x = x
-        pc.target_point_offset.y = y
-        pc.target_point_offset.z = z
-        pc.weight = 1.0
-        bv = BoundingVolume()
-        sp = SolidPrimitive()
-        sp.type = SolidPrimitive.BOX
-        sp.dimensions = [0.001, 0.001, 0.001]
-        bv.primitives = [sp]
-        pose = Pose()
-        pose.orientation.w = 1.0
-        bv.primitive_poses = [pose]
-        pc.constraint_region = bv
-        c.position_constraints = [pc]
-        return c
-
     def _go(self, x, y, z):
-        """规划并执行到 (x, y, z), 返回 (ok, error_code)."""
+        """解析逆解 + 关节目标规划并执行到 (x, y, z), 返回 (ok, error_code)."""
+        sol = solve_ik([x, y, z])
+        if sol is None:
+            return False, -1
+        c = Constraints()
+        c.joint_constraints = []
+        for name, value in zip(ARM_JOINTS, sol[:3]):
+            jc = JointConstraint()
+            jc.joint_name = name
+            jc.position = value
+            jc.tolerance_above = 0.01
+            jc.tolerance_below = 0.01
+            jc.weight = 1.0
+            c.joint_constraints.append(jc)
         goal = MoveGroup.Goal()
         goal.request.group_name = 'arm'
-        goal.request.goal_constraints = [self._pos_constraint(x, y, z)]
+        goal.request.goal_constraints = [c]
         goal.request.allowed_planning_time = 3.0
         goal.request.num_planning_attempts = 10
         goal.request.max_velocity_scaling_factor = 0.3
