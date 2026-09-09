@@ -32,7 +32,9 @@ robomaster_ep_moveit_config/          # MoveIt 配置包
 
 - Ubuntu 22.04 + ROS 2 Humble
 - Ignition Gazebo Fortress (`ign gazebo`), `ros_gz_sim`
-- MoveIt 2 (`ros-humble-moveit`), `moveit_commander`
+- MoveIt 2 (`ros-humble-moveit`), 任务节点直接用 MoveIt 原生接口
+  (/move_action Action、/compute_fk、/compute_cartesian_path、/execute_trajectory),
+  不依赖 moveit_commander
 - `ros2_control` + `ros2_controllers` + `gz_ros2_control` (源码或 apt 均可)
 
 ```bash

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""RoboMaster EP 定点抓取节点 (MoveIt 2 版)
+"""RoboMaster EP 定点抓取节点 (原生 MoveIt 2 接口, 不依赖 moveit_commander)
 
 流程: 回零 -> 取物点A上方(预抓取) -> 沿手指方向接近 -> 夹取 ->
       抬升 -> 放置点B上方(预放置) -> 沿手指方向接近 -> 释放 -> 回零
 
-- 手臂运动由 MoveIt move_group 规划并经由 arm_controller 的
-  FollowJointTrajectory Action 执行
+- 手臂运动: 经 move_group 的原生接口规划执行
+    * 位置IK/关节目标:  /move_action (MoveGroup Action)
+    * 笛卡尔直线:      /compute_cartesian_path + /execute_trajectory 服务
+    * 末端位姿:        /compute_fk 服务
+    * 急停:            向 /trajectory_execution/event 发 stop 事件
 - 夹爪通过 /gripper_controller/commands 话题直接控制
 - 每次规划/执行失败(不可达、无逆解、关节超限)都记录错误、急停、
   返回安全位置; 日志/轨迹/结果保存到 log_dir
@@ -16,6 +19,7 @@ import math
 import os
 import sys
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 import yaml
@@ -28,13 +32,15 @@ from ament_index_python.packages import get_package_share_directory
 from controller_manager_msgs.srv import ListControllers
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import Pose
-from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
+from moveit_msgs.action import MoveGroup
+from moveit_msgs.msg import (AttachedCollisionObject, BoundingVolume,
+                             CollisionObject, Constraints, JointConstraint,
+                             MoveItErrorCodes, PlanningScene, PositionConstraint,
+                             RobotState)
+from moveit_msgs.srv import ExecuteTrajectory, GetCartesianPath, GetPositionFK
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Float64MultiArray, String
-
-import moveit_commander
-from moveit_commander import MoveGroupCommander
 
 # 与 robomaster_ep_moveit_config/config/joint_limits.yaml 保持一致
 JOINT_LIMITS = {
@@ -62,6 +68,9 @@ DEFAULT_PARAMS = {
     'log_dir': 'results',
     'abort_on_error': False,
 }
+
+EE_LINK = 'gripper_base_link'
+GROUP = 'arm'
 
 
 class TaskError(Exception):
@@ -97,18 +106,15 @@ class PickPlaceNode(Node):
         self.grip_pub = self.create_publisher(Float64MultiArray, '/gripper_controller/commands', 10)
         self.scene_pub = self.create_publisher(PlanningScene, '/planning_scene', 10)
         self.status_pub = self.create_publisher(String, '/pick_place/status', 10)
+        self.stop_pub = self.create_publisher(String, '/trajectory_execution/event', 10)
         self._last_js = None
         self.create_subscription(JointState, '/joint_states', self._js_cb, 10)
 
-        # ---------- MoveIt ----------
-        if not rclpy.ok():
-            moveit_commander.roscpp_initialize(sys.argv)
-        self.group = MoveGroupCommander('arm', wait_for_servers=60.0)
-        self.group.set_max_velocity_scaling_factor(self.p['max_velocity_scale'])
-        self.group.set_max_acceleration_scaling_factor(self.p['max_acceleration_scale'])
-        self.group.set_goal_tolerance(0.01)
-        self.group.set_planning_time(3.0)
-        self.log('MoveIt move_group 已连接, 规划组: arm')
+        # ---------- MoveIt 原生接口 ----------
+        self.mg_cli = ActionClient(self, MoveGroup, '/move_action')
+        self.fk_cli = self.create_client(GetPositionFK, '/compute_fk')
+        self.cart_cli = self.create_client(GetCartesianPath, '/compute_cartesian_path')
+        self.exec_cli = self.create_client(ExecuteTrajectory, '/execute_trajectory')
 
         # ---------- 等待控制系统就绪 ----------
         self._wait_for_system()
@@ -192,9 +198,19 @@ class PickPlaceNode(Node):
                 want = ['joint_state_broadcaster', 'arm_controller', 'gripper_controller']
                 if all(states.get(w) == 'active' for w in want):
                     self.log('所有控制器已激活')
-                    return
+                    break
             time.sleep(2.0)
-        raise TaskError('控制器激活超时')
+        else:
+            raise TaskError('控制器激活超时')
+
+        # 4. 等 move_group 的规划/求解/执行接口
+        self.log('等待 move_group 接口 ...')
+        if not self.mg_cli.wait_for_server(timeout_sec=60.0):
+            raise TaskError('/move_action Action 服务超时未出现')
+        for svc in (self.fk_cli, self.cart_cli, self.exec_cli):
+            if not svc.wait_for_service(timeout_sec=60.0):
+                raise TaskError(f'{svc.srv_name} 服务超时未出现')
+        self.log('move_group 接口就绪')
 
     # ================= 规划场景 (桌面 + 物体 + attach) =================
 
@@ -232,8 +248,8 @@ class PickPlaceNode(Node):
         ps.is_diff = True
         ps.robot_state.is_diff = True
         att = AttachedCollisionObject()
-        att.link_name = 'gripper_base_link'
-        att.touch_links = ['gripper_base_link', 'left_finger_link', 'right_finger_link']
+        att.link_name = EE_LINK
+        att.touch_links = [EE_LINK, 'left_finger_link', 'right_finger_link']
         pp = self.p['pick_point']
         att.object = self._box_obj(
             'target_object', [pp['x'], pp['y'], pp['z']],
@@ -244,15 +260,113 @@ class PickPlaceNode(Node):
         time.sleep(1.0)  # 等场景监视器更新
         self.log('物体已附加到夹爪' if attach else '物体已从夹爪解除')
 
+    # ================= MoveIt 原生调用 =================
+
+    def _pos_constraint(self, xyz):
+        """仅约束末端位置 (姿态自由) 的位置约束, 等价于 set_position_target."""
+        c = Constraints()
+        pc = PositionConstraint()
+        pc.header.frame_id = 'world'
+        pc.link_name = EE_LINK
+        pc.target_point_offset.x = xyz[0]
+        pc.target_point_offset.y = xyz[1]
+        pc.target_point_offset.z = xyz[2]
+        pc.weight = 1.0
+        bv = BoundingVolume()
+        sp = SolidPrimitive()
+        sp.type = SolidPrimitive.BOX
+        sp.dimensions = [0.001, 0.001, 0.001]
+        bv.primitives = [sp]
+        pose = Pose()
+        pose.orientation.w = 1.0
+        bv.primitive_poses = [pose]
+        pc.constraint_region = bv
+        c.position_constraints = [pc]
+        return c
+
+    def _home_constraint(self):
+        """从 SRDF 读取 home 位姿并转成关节约束."""
+        srdf = os.path.join(
+            get_package_share_directory('robomaster_ep_moveit_config'),
+            'config', 'robomaster_ep.srdf')
+        tree = ET.parse(srdf)
+        for gs in tree.getroot().findall('group_state'):
+            if gs.get('name') == 'home':
+                c = Constraints()
+                c.joint_constraints = []
+                for j in gs.findall('joint'):
+                    jc = JointConstraint()
+                    jc.joint_name = j.get('name')
+                    jc.position = float(j.get('value'))
+                    jc.tolerance_above = 0.001
+                    jc.tolerance_below = 0.001
+                    jc.weight = 1.0
+                    c.joint_constraints.append(jc)
+                return c
+        raise TaskError('SRDF 中找不到 home 位姿')
+
+    def _mg_call(self, constraints, plan_only, label, timeout=180.0):
+        """通过 /move_action 规划(或规划并执行), 返回 MoveGroup.Result."""
+        goal = MoveGroup.Goal()
+        goal.request.group_name = GROUP
+        goal.request.goal_constraints = [constraints]
+        goal.request.allowed_planning_time = 3.0
+        goal.request.num_planning_attempts = 10
+        goal.request.max_velocity_scaling_factor = float(self.p['max_velocity_scale'])
+        goal.request.max_acceleration_scaling_factor = float(self.p['max_acceleration_scale'])
+        goal.planning_options.plan_only = plan_only
+        goal.planning_options.planning_scene_diff.is_diff = True
+        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
+        fut = self.mg_cli.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
+        if not fut.done() or fut.result() is None or not fut.result().accepted:
+            raise TaskError(f'{label}: MoveGroup 动作未接受')
+        res_fut = fut.result().get_result_async()
+        rclpy.spin_until_future_complete(self, res_fut, timeout_sec=timeout)
+        if not res_fut.done() or res_fut.result() is None:
+            raise TaskError(f'{label}: MoveGroup 规划/执行超时')
+        return res_fut.result().result
+
+    def _fk_pose(self):
+        """当前末端位姿 (空 robot_state 表示用 move_group 的当前状态)."""
+        req = GetPositionFK.Request()
+        req.header.frame_id = 'world'
+        req.header.stamp = self.get_clock().now().to_msg()
+        req.fk_link_names = [EE_LINK]
+        req.robot_state = RobotState()
+        fut = self.fk_cli.call_async(req)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=5.0)
+        if not fut.done() or fut.result() is None:
+            raise TaskError('FK 服务调用失败')
+        r = fut.result()
+        if r.error_code.val != MoveItErrorCodes.SUCCESS or not r.pose_stamped:
+            raise TaskError('FK 求解失败')
+        return r.pose_stamped[0].pose
+
+    def _execute_trajectory(self, traj, label):
+        req = ExecuteTrajectory.Request()
+        req.trajectory = traj
+        fut = self.exec_cli.call_async(req)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=180.0)
+        if not fut.done() or fut.result() is None:
+            raise TaskError(f'{label}: 轨迹执行超时')
+        r = fut.result()
+        if r.error_code.val != MoveItErrorCodes.SUCCESS:
+            raise TaskError(f'{label}: 轨迹执行失败 (error code={r.error_code.val})')
+
+    def _stop(self):
+        """急停: 通知 trajectory_execution_manager 停止当前轨迹."""
+        self.stop_pub.publish(String(data='stop'))
+
     # ================= 运动原语 =================
 
     def _ee_pos(self):
-        pose = self.group.get_current_pose().pose
+        pose = self._fk_pose()
         return [pose.position.x, pose.position.y, pose.position.z]
 
     def _finger_dir(self):
         """当前末端姿态下手指指向 (夹爪局部 +X 在世界系下的方向)."""
-        q = self.group.get_current_pose().pose.orientation
+        q = self._fk_pose().orientation
         return (1.0 - 2.0 * (q.y ** 2 + q.z ** 2),
                 2.0 * (q.x * q.y + q.w * q.z),
                 2.0 * (q.x * q.z - q.w * q.y))
@@ -270,31 +384,35 @@ class PickPlaceNode(Node):
 
     def go_to_pos(self, pos, label):
         """关节空间规划到指定末端位置 (位置 IK, 姿态自由)."""
-        if not self.group.set_position_target([pos[0], pos[1], pos[2]]):
-            raise TaskError(f'{label}: 位置目标无效 {pos}')
-        ok, traj, _, err = self.group.plan()
-        if not ok:
-            self.group.clear_pose_targets()
-            raise TaskError(f'{label}: 规划失败/无逆解 (error code={err.code}), '
+        res = self._mg_call(self._pos_constraint(pos), False, label)
+        if res.error_code.val != MoveItErrorCodes.SUCCESS:
+            raise TaskError(f'{label}: 规划失败/无逆解 (error code={res.error_code.val}), '
                             f'目标 {pos} 不可达或与障碍碰撞')
-        if not self.group.execute(traj, wait=True):
-            raise TaskError(f'{label}: 轨迹执行失败')
-        self.group.clear_pose_targets()
         self._check_limits(label)
         self._record(label, True)
         self.log(f'{label}: 到达 ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})')
 
     def go_cartesian(self, pos, label):
         """沿直线(笛卡尔路径)移动到指定位置, 保持当前姿态."""
-        cur = self.group.get_current_pose().pose
+        cur = self._fk_pose()
         wp = Pose()
         wp.position.x, wp.position.y, wp.position.z = pos
         wp.orientation = cur.orientation
-        traj, fraction = self.group.compute_cartesian_path([wp], 0.005, 0.0)
-        if traj is None or fraction < 0.95:
-            raise TaskError(f'{label}: 笛卡尔路径规划失败 (fraction={fraction:.2f})')
-        if not self.group.execute(traj, wait=True):
-            raise TaskError(f'{label}: 笛卡尔轨迹执行失败')
+        req = GetCartesianPath.Request()
+        req.header.frame_id = 'world'
+        req.header.stamp = self.get_clock().now().to_msg()
+        req.group_name = GROUP
+        req.link_name = EE_LINK
+        req.waypoints = [wp]
+        req.max_step = 0.005
+        req.jump_threshold = 0.0
+        req.avoid_collisions = True
+        fut = self.cart_cli.call_async(req)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=60.0)
+        r = fut.result()
+        if r is None or r.fraction < 0.95:
+            raise TaskError(f'{label}: 笛卡尔路径规划失败 (fraction={r.fraction if r else -1:.2f})')
+        self._execute_trajectory(r.solution, label)
         self._check_limits(label)
         self._record(label, True)
         self.log(f'{label}: 直线到达 ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})')
@@ -306,13 +424,9 @@ class PickPlaceNode(Node):
         self.log(f'{label}: 夹爪指令 {value:.3f} m')
 
     def go_home(self):
-        if not self.group.set_named_target('home'):
-            raise TaskError('回零: SRDF 中找不到 home 位姿')
-        ok, traj, _, err = self.group.plan()
-        if not ok:
-            raise TaskError(f'回零: 规划失败 (error code={err.code})')
-        if not self.group.execute(traj, wait=True):
-            raise TaskError('回零: 轨迹执行失败')
+        res = self._mg_call(self._home_constraint(), False, '回零')
+        if res.error_code.val != MoveItErrorCodes.SUCCESS:
+            raise TaskError(f'回零: 规划失败 (error code={res.error_code.val})')
         self._record('home', True)
         self.log('回零完成')
 
@@ -330,7 +444,7 @@ class PickPlaceNode(Node):
             row[6] = round(vals.get('left_finger_joint', float('nan')), 4)
             row[7] = round(vals.get('right_finger_joint', float('nan')), 4)
         try:
-            pose = self.group.get_current_pose().pose
+            pose = self._fk_pose()
             row[8] = round(pose.position.x, 4)
             row[9] = round(pose.position.y, 4)
             row[10] = round(pose.position.z, 4)
@@ -416,7 +530,7 @@ class PickPlaceNode(Node):
     def _stop_safe(self, reason):
         """失败后的安全处理: 急停 -> 尽力回零 -> 记录错误."""
         self.status(f'错误: {reason}, 急停')
-        self.group.stop()
+        self._stop()
         self._record(f'stop:{reason}', False)
         try:
             self.go_home()
@@ -428,13 +542,11 @@ class PickPlaceNode(Node):
         for name in ('pick_point', 'place_point'):
             pos = self.p[name]
             xyz = [pos['x'], pos['y'], pos['z']]
-            if not self.group.set_position_target(xyz):
-                self.log(f'错误: {name} {xyz} 位置目标无效, 任务中止', 'error')
-                return 2
-            ok, _, _, err = self.group.plan()
-            self.group.clear_pose_targets()
-            if not ok:
-                self.log(f'错误: {name} {xyz} 不可达/无逆解 (error code={err.code}), '
+            res = self._mg_call(self._pos_constraint(xyz), True,
+                                f'{name} 可达性预检查')
+            if res.error_code.val != MoveItErrorCodes.SUCCESS:
+                self.log(f'错误: {name} {xyz} 不可达/无逆解 '
+                         f'(error code={res.error_code.val}), '
                          f'任务中止, 请用 calibrate_pose 重新标定', 'error')
                 self._stop_safe(f'{name} 不可达')
                 return 1
