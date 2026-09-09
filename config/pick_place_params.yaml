@@ -4,14 +4,19 @@ pick_place_node:
     num_cycles: 5               # 连续抓取次数 (验收: 5 次至少成功 4 次)
     gripper_open: 0.040         # 手指开度指令 [m]
     gripper_closed: 0.006       # 夹紧开度指令 [m], 对应夹住 7cm 立方体
-    approach_dist: 0.12         # 预抓取点沿手指方向距物体中心的距离 [m]
-    lift_dist: 0.12             # 抓起/放下后的抬升高度 [m]
     max_velocity_scale: 0.5     # 速度比例 (0~1)
     max_acceleration_scale: 0.5 # 加速度比例 (0~1)
-    pick_point: {x: 0.60, y: 0.0, z: 0.337}     # 取物点 A (物体中心, 与 world 一致)
-    place_point: {x: 0.35, y: 0.30, z: 0.337}   # 放置点 B
+
+    # 几何说明 (基于 FK 实测):
+    # 臂为 3-DOF 平面臂(绕 yaw 轴可转), 末端 z=0.337 平面内可达径向距离
+    # r ∈ [0.59, 0.64] (前臂水平), 手指沿径向水平伸出, 从侧面夹取物体。
+    # 桌面 x∈[0.38,1.18], 顶面 z=0.30; 上臂上仰极限 -0.8 时恰好越过桌沿。
+    pick_point: {x: 0.60, y: 0.0, z: 0.337}       # 取物点 A (物体中心, r=0.60)
+    place_point: {x: 0.55, y: 0.25, z: 0.337}     # 放置点 B (r=0.604, 方位 24.4°)
+    pre_pick_point: {x: 0.545, y: 0.0, z: 0.479}  # 预抓取点 A 上方可达点
+    pre_place_point: {x: 0.535, y: 0.242, z: 0.42}  # 预放置点 B 上方可达点
+
     attach_object: true         # 夹紧后把物体 attach 到夹爪, 运输不掉落
-    finger_center_offset: 0.06  # 手指中心相对 gripper_base_link 沿 +X 的偏移 [m]
     object_size: 0.07           # 目标物体立方体边长 [m]
-    table: {center: [0.75, 0.0, 0.15], size: [0.90, 0.70, 0.30]}  # 碰撞场景中的桌面
+    table: {center: [0.78, 0.0, 0.15], size: [0.80, 0.70, 0.30]}  # 碰撞场景中的桌面
     log_dir: results            # 日志/轨迹/结果输出目录 (相对运行目录)

@@ -94,11 +94,32 @@
 
   <ros2_control name="GazeboSystem" type="system">
     <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
-    <joint name="base_yaw_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
-    <joint name="arm_lift_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
-    <joint name="wrist_pitch_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
-    <joint name="left_finger_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
-    <joint name="right_finger_joint"><command_interface name="position"/><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <!-- 初始关节值 = SRDF home 位姿: 上臂上仰极限+前臂回折, 避开桌面(顶面 z=0.30) -->
+    <joint name="base_yaw_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="arm_lift_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">-0.8</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_pitch_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">-1.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="left_finger_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.04</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_finger_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.04</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
   </ros2_control>
 
   <gazebo>
