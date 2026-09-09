@@ -1,0 +1,17 @@
+# 抓取任务参数 (可在 launch 时用 params_file:=/path/to/xxx.yaml 覆盖)
+pick_place_node:
+  ros__parameters:
+    num_cycles: 5               # 连续抓取次数 (验收: 5 次至少成功 4 次)
+    gripper_open: 0.040         # 手指开度指令 [m]
+    gripper_closed: 0.006       # 夹紧开度指令 [m], 对应夹住 7cm 立方体
+    approach_dist: 0.12         # 预抓取点沿手指方向距物体中心的距离 [m]
+    lift_dist: 0.12             # 抓起/放下后的抬升高度 [m]
+    max_velocity_scale: 0.5     # 速度比例 (0~1)
+    max_acceleration_scale: 0.5 # 加速度比例 (0~1)
+    pick_point: {x: 0.60, y: 0.0, z: 0.337}     # 取物点 A (物体中心, 与 world 一致)
+    place_point: {x: 0.35, y: 0.30, z: 0.337}   # 放置点 B
+    attach_object: true         # 夹紧后把物体 attach 到夹爪, 运输不掉落
+    finger_center_offset: 0.06  # 手指中心相对 gripper_base_link 沿 +X 的偏移 [m]
+    object_size: 0.07           # 目标物体立方体边长 [m]
+    table: {center: [0.75, 0.0, 0.15], size: [0.90, 0.70, 0.30]}  # 碰撞场景中的桌面
+    log_dir: results            # 日志/轨迹/结果输出目录 (相对运行目录)
