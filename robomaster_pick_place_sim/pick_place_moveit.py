@@ -6,7 +6,7 @@
 
 - 手臂运动: 经 move_group 的原生接口规划执行
     * 位置IK/关节目标:  /move_action (MoveGroup Action)
-    * 笛卡尔直线:      /compute_cartesian_path + /execute_trajectory 服务
+    * 笛卡尔直线:      /compute_cartesian_path + /execute_trajectory 动作
     * 末端位姿:        /compute_fk 服务
     * 急停:            向 /trajectory_execution/event 发 stop 事件
 - 夹爪通过 /gripper_controller/commands 话题直接控制
@@ -32,12 +32,13 @@ from ament_index_python.packages import get_package_share_directory
 from controller_manager_msgs.srv import ListControllers
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import Pose
-from moveit_msgs.action import MoveGroup
-from moveit_msgs.msg import (AttachedCollisionObject, BoundingVolume,
-                             CollisionObject, Constraints, JointConstraint,
-                             MoveItErrorCodes, PlanningScene, PositionConstraint,
-                             RobotState)
-from moveit_msgs.srv import ExecuteTrajectory, GetCartesianPath, GetPositionFK
+from moveit_msgs.action import ExecuteTrajectory, MoveGroup
+from moveit_msgs.msg import (AllowedCollisionEntry, AttachedCollisionObject,
+                             BoundingVolume, CollisionObject, Constraints,
+                             JointConstraint, MoveItErrorCodes,
+                             OrientationConstraint, PlanningScene,
+                             PositionConstraint, RobotState)
+from moveit_msgs.srv import GetCartesianPath, GetPositionFK
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Float64MultiArray, String
@@ -55,16 +56,15 @@ DEFAULT_PARAMS = {
     'num_cycles': 5,
     'gripper_open': 0.040,
     'gripper_closed': 0.006,
-    'approach_dist': 0.12,
-    'lift_dist': 0.12,
     'max_velocity_scale': 0.5,
     'max_acceleration_scale': 0.5,
     'pick_point': {'x': 0.60, 'y': 0.0, 'z': 0.337},
-    'place_point': {'x': 0.35, 'y': 0.30, 'z': 0.337},
+    'place_point': {'x': 0.55, 'y': 0.25, 'z': 0.337},
+    'pre_pick_point': {'x': 0.545, 'y': 0.0, 'z': 0.479},
+    'pre_place_point': {'x': 0.535, 'y': 0.242, 'z': 0.42},
     'attach_object': True,
-    'finger_center_offset': 0.06,
     'object_size': 0.07,
-    'table': {'center': [0.75, 0.0, 0.15], 'size': [0.90, 0.70, 0.30]},
+    'table': {'center': [0.78, 0.0, 0.15], 'size': [0.80, 0.70, 0.30]},
     'log_dir': 'results',
     'abort_on_error': False,
 }
@@ -81,7 +81,7 @@ class PickPlaceNode(Node):
     def __init__(self):
         super().__init__('pick_place_node')
         self.declare_parameter('params_file', '')
-        self.declare_parameter('use_sim_time', True)
+        # 注: use_sim_time 由 launch 文件统一传入, 这里不再 declare (否则重复声明抛异常)
 
         self.p = self._load_params()
 
@@ -114,7 +114,9 @@ class PickPlaceNode(Node):
         self.mg_cli = ActionClient(self, MoveGroup, '/move_action')
         self.fk_cli = self.create_client(GetPositionFK, '/compute_fk')
         self.cart_cli = self.create_client(GetCartesianPath, '/compute_cartesian_path')
-        self.exec_cli = self.create_client(ExecuteTrajectory, '/execute_trajectory')
+        # humble 的 MoveGroupExecuteService capability 是坏的 (类被移除),
+        # 轨迹执行走 MoveGroupExecuteTrajectoryAction 动作接口
+        self.exec_cli = ActionClient(self, ExecuteTrajectory, '/execute_trajectory')
 
         # ---------- 等待控制系统就绪 ----------
         self._wait_for_system()
@@ -207,9 +209,11 @@ class PickPlaceNode(Node):
         self.log('等待 move_group 接口 ...')
         if not self.mg_cli.wait_for_server(timeout_sec=60.0):
             raise TaskError('/move_action Action 服务超时未出现')
-        for svc in (self.fk_cli, self.cart_cli, self.exec_cli):
+        for svc in (self.fk_cli, self.cart_cli):
             if not svc.wait_for_service(timeout_sec=60.0):
                 raise TaskError(f'{svc.srv_name} 服务超时未出现')
+        if not self.exec_cli.wait_for_server(timeout_sec=60.0):
+            raise TaskError('/execute_trajectory Action 服务超时未出现')
         self.log('move_group 接口就绪')
 
     # ================= 规划场景 (桌面 + 物体 + attach) =================
@@ -240,6 +244,13 @@ class PickPlaceNode(Node):
             self._box_obj('target_object', [pp['x'], pp['y'], pp['z']],
                           [self.p['object_size']] * 3),
         ]
+        # 夹爪与目标物体之间允许接触: 手指需要框住物体侧面才能夹取,
+        # 否则 OMPL 碰撞检测会把抓取位姿判为无效
+        # (AllowedCollisionEntry.enabled 是 bool 数组, 与 entry_names 逐位对应)
+        acm = ps.allowed_collision_matrix
+        acm.entry_names = [EE_LINK, 'left_finger_link', 'right_finger_link']
+        acm.entry = [AllowedCollisionEntry(enabled=[True])
+                     for _ in acm.entry_names]
         self.scene_pub.publish(ps)
 
     def _attach_object(self, attach):
@@ -262,8 +273,25 @@ class PickPlaceNode(Node):
 
     # ================= MoveIt 原生调用 =================
 
-    def _pos_constraint(self, xyz):
-        """仅约束末端位置 (姿态自由) 的位置约束, 等价于 set_position_target."""
+    @staticmethod
+    def _euler_to_quat(roll, pitch, yaw):
+        """rpy -> quaternion (xyz w 顺序)."""
+        cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+        cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+        cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+        return [sr * cp * cy - cr * sp * sy,
+                cr * sp * cy + sr * cp * sy,
+                cr * cp * sy - sr * sp * cy,
+                cr * cp * cy + sr * sp * sy]
+
+    def _pos_constraint(self, xyz, theta=0.0):
+        """末端位置约束 + 手指方向约束.
+
+        位置: gripper_base_link 到 xyz (BOX 0.001³ 区域)
+        姿态: gripper_base_link 的 +X 轴(手指方向)水平指向径向 (cosθ, sinθ, 0),
+              θ = atan2(y, x) 为目标的方位角; 绕 X 的滚转不敏感, 俯仰/偏航收紧,
+              保证手指水平从侧面夹取物体。
+        """
         c = Constraints()
         pc = PositionConstraint()
         pc.header.frame_id = 'world'
@@ -282,6 +310,17 @@ class PickPlaceNode(Node):
         bv.primitive_poses = [pose]
         pc.constraint_region = bv
         c.position_constraints = [pc]
+
+        oc = OrientationConstraint()
+        oc.header.frame_id = 'world'
+        oc.link_name = EE_LINK
+        oc.orientation.x, oc.orientation.y, oc.orientation.z, oc.orientation.w = \
+            self._euler_to_quat(0.0, 0.0, theta)
+        oc.absolute_x_axis_tolerance = 0.5    # 手指滚转: 无影响, 放宽
+        oc.absolute_y_axis_tolerance = 0.12   # 手指俯仰: 收紧
+        oc.absolute_z_axis_tolerance = 0.12   # 手指偏航: 收紧
+        oc.weight = 1.0
+        c.orientation_constraints = [oc]
         return c
 
     def _home_constraint(self):
@@ -344,13 +383,18 @@ class PickPlaceNode(Node):
         return r.pose_stamped[0].pose
 
     def _execute_trajectory(self, traj, label):
-        req = ExecuteTrajectory.Request()
-        req.trajectory = traj
-        fut = self.exec_cli.call_async(req)
-        rclpy.spin_until_future_complete(self, fut, timeout_sec=180.0)
-        if not fut.done() or fut.result() is None:
+        """通过 /execute_trajectory Action 执行轨迹 (humble 无可用服务版)."""
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = traj
+        fut = self.exec_cli.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
+        if not fut.done() or fut.result() is None or not fut.result().accepted:
+            raise TaskError(f'{label}: 轨迹执行动作未接受')
+        res_fut = fut.result().get_result_async()
+        rclpy.spin_until_future_complete(self, res_fut, timeout_sec=180.0)
+        if not res_fut.done() or res_fut.result() is None:
             raise TaskError(f'{label}: 轨迹执行超时')
-        r = fut.result()
+        r = res_fut.result().result
         if r.error_code.val != MoveItErrorCodes.SUCCESS:
             raise TaskError(f'{label}: 轨迹执行失败 (error code={r.error_code.val})')
 
@@ -359,17 +403,6 @@ class PickPlaceNode(Node):
         self.stop_pub.publish(String(data='stop'))
 
     # ================= 运动原语 =================
-
-    def _ee_pos(self):
-        pose = self._fk_pose()
-        return [pose.position.x, pose.position.y, pose.position.z]
-
-    def _finger_dir(self):
-        """当前末端姿态下手指指向 (夹爪局部 +X 在世界系下的方向)."""
-        q = self._fk_pose().orientation
-        return (1.0 - 2.0 * (q.y ** 2 + q.z ** 2),
-                2.0 * (q.x * q.y + q.w * q.z),
-                2.0 * (q.x * q.z - q.w * q.y))
 
     def _check_limits(self, label):
         js = self._current_joint_states()
@@ -382,40 +415,15 @@ class PickPlaceNode(Node):
                     raise TaskError(f'{label}: 关节 {name} 超限 '
                                     f'({value:.3f} 超出 [{lo}, {hi}])')
 
-    def go_to_pos(self, pos, label):
-        """关节空间规划到指定末端位置 (位置 IK, 姿态自由)."""
-        res = self._mg_call(self._pos_constraint(pos), False, label)
+    def go_to_pos(self, pos, label, theta=0.0):
+        """关节空间规划到指定末端位置 (位置 IK + 手指方向约束)."""
+        res = self._mg_call(self._pos_constraint(pos, theta), False, label)
         if res.error_code.val != MoveItErrorCodes.SUCCESS:
             raise TaskError(f'{label}: 规划失败/无逆解 (error code={res.error_code.val}), '
                             f'目标 {pos} 不可达或与障碍碰撞')
         self._check_limits(label)
         self._record(label, True)
         self.log(f'{label}: 到达 ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})')
-
-    def go_cartesian(self, pos, label):
-        """沿直线(笛卡尔路径)移动到指定位置, 保持当前姿态."""
-        cur = self._fk_pose()
-        wp = Pose()
-        wp.position.x, wp.position.y, wp.position.z = pos
-        wp.orientation = cur.orientation
-        req = GetCartesianPath.Request()
-        req.header.frame_id = 'world'
-        req.header.stamp = self.get_clock().now().to_msg()
-        req.group_name = GROUP
-        req.link_name = EE_LINK
-        req.waypoints = [wp]
-        req.max_step = 0.005
-        req.jump_threshold = 0.0
-        req.avoid_collisions = True
-        fut = self.cart_cli.call_async(req)
-        rclpy.spin_until_future_complete(self, fut, timeout_sec=60.0)
-        r = fut.result()
-        if r is None or r.fraction < 0.95:
-            raise TaskError(f'{label}: 笛卡尔路径规划失败 (fraction={r.fraction if r else -1:.2f})')
-        self._execute_trajectory(r.solution, label)
-        self._check_limits(label)
-        self._record(label, True)
-        self.log(f'{label}: 直线到达 ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})')
 
     def grip(self, value, label):
         self.grip_pub.publish(Float64MultiArray(data=[float(value), float(value)]))
@@ -459,6 +467,13 @@ class PickPlaceNode(Node):
         self.cycle = i
         pp = self.p['pick_point']
         bp = self.p['place_point']
+        ppre = self.p['pre_pick_point']
+        bpre = self.p['pre_place_point']
+        # 手指水平指向径向: 目标点方位角 = 期望的 gripper_base +X 方向
+        th_pp = math.atan2(pp['y'], pp['x'])
+        th_bp = math.atan2(bp['y'], bp['x'])
+        th_ppre = math.atan2(ppre['y'], ppre['x'])
+        th_bpre = math.atan2(bpre['y'], bpre['x'])
         steps = []
 
         self.status(f'开始第 {i}/{self.p["num_cycles"]} 次抓取')
@@ -466,22 +481,11 @@ class PickPlaceNode(Node):
         self.go_home()
         steps.append('home')
 
-        # --- 取物点 A: 先到预抓取点, 读实际手指方向, 再沿手指方向直线接近 ---
-        pre = [pp['x'] - self.p['approach_dist'], pp['y'], pp['z']]
-        self.go_to_pos(pre, f'cycle{i}_pre_pick')
+        # --- 取物点 A: 预抓取点(上方可达) -> 抓取点(物体中心, 手指水平径向) ---
+        self.go_to_pos([ppre['x'], ppre['y'], ppre['z']], f'cycle{i}_pre_pick', th_ppre)
         steps.append(f'cycle{i}_pre_pick')
-        f = self._finger_dir()
-        pre = [pp['x'] - f[0] * self.p['approach_dist'],
-               pp['y'] - f[1] * self.p['approach_dist'],
-               pp['z'] - f[2] * self.p['approach_dist']]
-        if math.dist(pre, self._ee_pos()) > 0.02:
-            self.go_to_pos(pre, f'cycle{i}_pre_pick_align')
-            steps.append(f'cycle{i}_pre_pick_align')
-        pick_pos = [pp['x'] - f[0] * self.p['finger_center_offset'],
-                    pp['y'] - f[1] * self.p['finger_center_offset'],
-                    pp['z'] - f[2] * self.p['finger_center_offset']]
-        self.go_cartesian(pick_pos, f'cycle{i}_pick_approach')
-        steps.append(f'cycle{i}_pick_approach')
+        self.go_to_pos([pp['x'], pp['y'], pp['z']], f'cycle{i}_pick', th_pp)
+        steps.append(f'cycle{i}_pick')
 
         # --- 夹取 + attach ---
         self.grip(self.p['gripper_closed'], f'cycle{i}_grip_close')
@@ -489,37 +493,22 @@ class PickPlaceNode(Node):
         if self.p['attach_object']:
             self._attach_object(True)
 
-        # --- 抬升到安全高度 ---
-        lift = self._ee_pos()
-        lift[2] += self.p['lift_dist']
-        self.go_cartesian(lift, f'cycle{i}_lift')
+        # --- 抬离桌面: 回预抓取点 (物体随夹爪, 与夹爪之间无碰撞) ---
+        self.go_to_pos([ppre['x'], ppre['y'], ppre['z']], f'cycle{i}_lift', th_ppre)
         steps.append(f'cycle{i}_lift')
 
-        # --- 放置点 B: 同样的自适应接近 ---
-        pre = [bp['x'] - self.p['approach_dist'], bp['y'], bp['z']]
-        self.go_to_pos(pre, f'cycle{i}_pre_place')
+        # --- 移向放置点 B: 预放置点 -> 放置点 ---
+        self.go_to_pos([bpre['x'], bpre['y'], bpre['z']], f'cycle{i}_pre_place', th_bpre)
         steps.append(f'cycle{i}_pre_place')
-        f = self._finger_dir()
-        pre = [bp['x'] - f[0] * self.p['approach_dist'],
-               bp['y'] - f[1] * self.p['approach_dist'],
-               bp['z'] - f[2] * self.p['approach_dist']]
-        if math.dist(pre, self._ee_pos()) > 0.02:
-            self.go_to_pos(pre, f'cycle{i}_pre_place_align')
-            steps.append(f'cycle{i}_pre_place_align')
-        place_pos = [bp['x'] - f[0] * self.p['finger_center_offset'],
-                     bp['y'] - f[1] * self.p['finger_center_offset'],
-                     bp['z'] - f[2] * self.p['finger_center_offset']]
-        self.go_cartesian(place_pos, f'cycle{i}_place_approach')
-        steps.append(f'cycle{i}_place_approach')
+        self.go_to_pos([bp['x'], bp['y'], bp['z']], f'cycle{i}_place', th_bp)
+        steps.append(f'cycle{i}_place')
 
-        # --- 释放 + detach + 抬离 ---
+        # --- 释放 + detach + 撤回 ---
         if self.p['attach_object']:
             self._attach_object(False)
         self.grip(self.p['gripper_open'], f'cycle{i}_release')
         steps.append(f'cycle{i}_release')
-        lift = self._ee_pos()
-        lift[2] += self.p['lift_dist']
-        self.go_cartesian(lift, f'cycle{i}_withdraw')
+        self.go_to_pos([bpre['x'], bpre['y'], bpre['z']], f'cycle{i}_withdraw', th_bpre)
         steps.append(f'cycle{i}_withdraw')
 
         self.go_home()
