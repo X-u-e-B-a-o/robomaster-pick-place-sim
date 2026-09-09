@@ -14,12 +14,18 @@ setup(
         ('share/' + package_name + '/urdf', glob('urdf/*.urdf')),
         ('share/' + package_name + '/worlds', glob('worlds/*.sdf')),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
-        ('share/' + package_name + '/scripts', glob('scripts/*.py')),
     ],
+    entry_points={
+        'console_scripts': [
+            'pick_place_moveit = robomaster_pick_place_sim.pick_place_moveit:main',
+            'calibrate_pose = robomaster_pick_place_sim.calibrate_pose:main',
+            'test_joints = robomaster_pick_place_sim.test_joints:main',
+        ],
+    },
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='nvidia',
-    maintainer_email='nvidia@todo.todo',
-    description='RoboMaster EP/Core pick and place Gazebo simulation',
+    maintainer='LpTriX',
+    maintainer_email='LpTriX@users.noreply.github.com',
+    description='RoboMaster EP pick and place Gazebo simulation',
     license='MIT',
 )
