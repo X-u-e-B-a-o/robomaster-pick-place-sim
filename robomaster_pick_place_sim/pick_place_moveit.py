@@ -6,7 +6,7 @@
 
 - 手臂运动: 经 move_group 的原生接口规划执行
     * 位置IK/关节目标:  /move_action (MoveGroup Action)
-    * 笛卡尔直线:      /compute_cartesian_path + /execute_trajectory 服务
+    * 笛卡尔直线:      /compute_cartesian_path + /execute_trajectory 动作
     * 末端位姿:        /compute_fk 服务
     * 急停:            向 /trajectory_execution/event 发 stop 事件
 - 夹爪通过 /gripper_controller/commands 话题直接控制
@@ -32,12 +32,12 @@ from ament_index_python.packages import get_package_share_directory
 from controller_manager_msgs.srv import ListControllers
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import Pose
-from moveit_msgs.action import MoveGroup
+from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (AttachedCollisionObject, BoundingVolume,
                              CollisionObject, Constraints, JointConstraint,
                              MoveItErrorCodes, PlanningScene, PositionConstraint,
                              RobotState)
-from moveit_msgs.srv import ExecuteTrajectory, GetCartesianPath, GetPositionFK
+from moveit_msgs.srv import GetCartesianPath, GetPositionFK
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Float64MultiArray, String
@@ -114,7 +114,9 @@ class PickPlaceNode(Node):
         self.mg_cli = ActionClient(self, MoveGroup, '/move_action')
         self.fk_cli = self.create_client(GetPositionFK, '/compute_fk')
         self.cart_cli = self.create_client(GetCartesianPath, '/compute_cartesian_path')
-        self.exec_cli = self.create_client(ExecuteTrajectory, '/execute_trajectory')
+        # humble 的 MoveGroupExecuteService capability 是坏的 (类被移除),
+        # 轨迹执行走 MoveGroupExecuteTrajectoryAction 动作接口
+        self.exec_cli = ActionClient(self, ExecuteTrajectory, '/execute_trajectory')
 
         # ---------- 等待控制系统就绪 ----------
         self._wait_for_system()
@@ -207,9 +209,11 @@ class PickPlaceNode(Node):
         self.log('等待 move_group 接口 ...')
         if not self.mg_cli.wait_for_server(timeout_sec=60.0):
             raise TaskError('/move_action Action 服务超时未出现')
-        for svc in (self.fk_cli, self.cart_cli, self.exec_cli):
+        for svc in (self.fk_cli, self.cart_cli):
             if not svc.wait_for_service(timeout_sec=60.0):
                 raise TaskError(f'{svc.srv_name} 服务超时未出现')
+        if not self.exec_cli.wait_for_server(timeout_sec=60.0):
+            raise TaskError('/execute_trajectory Action 服务超时未出现')
         self.log('move_group 接口就绪')
 
     # ================= 规划场景 (桌面 + 物体 + attach) =================
@@ -344,13 +348,18 @@ class PickPlaceNode(Node):
         return r.pose_stamped[0].pose
 
     def _execute_trajectory(self, traj, label):
-        req = ExecuteTrajectory.Request()
-        req.trajectory = traj
-        fut = self.exec_cli.call_async(req)
-        rclpy.spin_until_future_complete(self, fut, timeout_sec=180.0)
-        if not fut.done() or fut.result() is None:
+        """通过 /execute_trajectory Action 执行轨迹 (humble 无可用服务版)."""
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = traj
+        fut = self.exec_cli.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
+        if not fut.done() or fut.result() is None or not fut.result().accepted:
+            raise TaskError(f'{label}: 轨迹执行动作未接受')
+        res_fut = fut.result().get_result_async()
+        rclpy.spin_until_future_complete(self, res_fut, timeout_sec=180.0)
+        if not res_fut.done() or res_fut.result() is None:
             raise TaskError(f'{label}: 轨迹执行超时')
-        r = fut.result()
+        r = res_fut.result().result
         if r.error_code.val != MoveItErrorCodes.SUCCESS:
             raise TaskError(f'{label}: 轨迹执行失败 (error code={r.error_code.val})')
 

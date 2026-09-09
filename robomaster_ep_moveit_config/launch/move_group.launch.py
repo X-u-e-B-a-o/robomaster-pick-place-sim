@@ -31,32 +31,15 @@ def generate_launch_description():
     moveit_controllers = load_yaml(moveit_config_share, 'config', 'moveit_controllers.yaml')
     ompl = load_yaml(moveit_config_share, 'config', 'ompl_planning.yaml')
 
-    # OMPL 规划管线: ompl_planning.yaml 与管线框架参数合并
-    ompl.update({
-        'move_group': {
-            'planning_plugins': ['ompl_interface/OMPLPlanner'],
-            'request_adapters': (
-                'default_planner_request_adapters/AddTimeParameterization '
-                'default_planner_request_adapters/ResolveConstraintFrames '
-                'default_planner_request_adapters/FixWorkspaceBounds '
-                'default_planner_request_adapters/FixStartStateBounds '
-                'default_planner_request_adapters/FixStartStateCollision '
-                'default_planner_request_adapters/FixStartStatePathConstraints'
-            ),
-            'response_adapters': (
-                'default_planning_response_adapters/AddTimeParameterization '
-                'default_planning_response_adapters/ValidateSolution '
-                'default_planning_response_adapters/DisplayMotionPath'
-            ),
-            'start_state_max_bounds_error': 0.1,
-        }
-    })
-    planning_pipelines = {'ompl': ompl}
-
-    # robot_description_planning = 关节限位 + 控制器配置
-    robot_description_planning = {}
-    robot_description_planning.update(joint_limits)
-    robot_description_planning.update(moveit_controllers)
+    # 参数结构与官方 moveit_configs_utils.MoveItConfigsBuilder.to_dict() 一致:
+    # - planning_pipelines 是管线名字列表 (move_group.cpp 读 vector<string>)
+    # - 每条管线的配置 (planning_plugin/adapters/planner_configs) 作为顶层参数 ~<pipeline>.*
+    # - moveit_controllers.yaml 内容顶层合并 (moveit_controller_manager +
+    #   moveit_simple_controller_manager 直接落在 move_group 节点命名空间)
+    # - robot_description_planning 只含关节限位
+    planning_pipelines = {'planning_pipelines': ['ompl'],
+                          'default_planning_pipeline': 'ompl',
+                          'ompl': ompl}
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
 
@@ -64,21 +47,15 @@ def generate_launch_description():
         robot_description,
         robot_description_semantic,
         {'robot_description_kinematics': kinematics},
-        {'robot_description_planning': robot_description_planning},
-        {'trajectory_execution': moveit_controllers},
-        {'planning_pipelines': planning_pipelines},
-        {'default_planning_pipeline': 'ompl'},
+        {'robot_description_planning': joint_limits},
+        moveit_controllers,
+        planning_pipelines,
         {
+            'moveit_manage_controllers': True,
             'use_sim_time': use_sim_time,
-            'publish_robot_description_semantic': True,
             'allow_trajectory_execution': True,
-            'capabilities': (
-                'move_group/MoveGroupExecuteService '
-                'move_group/MoveGroupCartesianPathService '
-                'move_group/MoveGroupMoveService '
-                'move_group/MoveGroupKinematicsService'
-            ),
             'monitor_dynamics': False,
+            'publish_robot_description_semantic': True,
             'publish_planning_scene': True,
             'publish_geometry_updates': True,
             'publish_state_updates': True,
