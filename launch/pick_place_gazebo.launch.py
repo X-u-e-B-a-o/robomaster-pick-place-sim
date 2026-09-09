@@ -1,6 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess, TimerAction
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.substitutions import Command
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -9,8 +10,9 @@ def generate_launch_description():
     pkg = get_package_share_directory('robomaster_pick_place_sim')
     urdf = os.path.join(pkg, 'urdf', 'robomaster_ep_gazebo.urdf')
     world = os.path.join(pkg, 'worlds', 'pick_place.sdf')
-    robot_description = {'robot_description': Command(['xacro ', urdf]),
-                         'use_sim_time': True}
+    robot_description = {'robot_description': ParameterValue(
+        Command(['xacro ', urdf]), value_type=str),
+        'use_sim_time': True}
 
     return LaunchDescription([
         ExecuteProcess(cmd=['ign', 'gazebo', '-r', '-v', '1', world, '--force-version', '6'], output='screen'),
