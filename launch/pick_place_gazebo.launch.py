@@ -9,19 +9,24 @@ def generate_launch_description():
     pkg = get_package_share_directory('robomaster_pick_place_sim')
     urdf = os.path.join(pkg, 'urdf', 'robomaster_ep_gazebo.urdf')
     world = os.path.join(pkg, 'worlds', 'pick_place.sdf')
-    robot_description = {'robot_description': Command(['xacro ', urdf])}
+    robot_description = {'robot_description': Command(['xacro ', urdf]),
+                         'use_sim_time': True}
 
     return LaunchDescription([
         ExecuteProcess(cmd=['ign', 'gazebo', '-r', '-v', '1', world, '--force-version', '6'], output='screen'),
-        Node(package='robot_state_publisher', executable='robot_state_publisher', parameters=[robot_description], output='screen'),
+        Node(package='robot_state_publisher', executable='robot_state_publisher',
+             parameters=[robot_description], output='screen'),
+        # 等 Gazebo 起来后再把机器人从 robot_description topic 生成到世界里
         TimerAction(period=3.0, actions=[
             Node(package='ros_gz_sim', executable='create',
-                 arguments=['-name', 'robomaster_ep_core', '-topic', 'robot_description', '-x', '0', '-y', '0', '-z', '0'],
+                 arguments=['-name', 'robomaster_ep_core', '-topic', 'robot_description',
+                            '-x', '0', '-y', '0', '-z', '0'],
                  output='screen')
         ]),
+        # spawner 会等 controller_manager 服务可用后再加载并激活控制器
         TimerAction(period=6.0, actions=[
-            ExecuteProcess(cmd=['ros2', 'control', 'load_controller', '--set-state', 'active', 'joint_state_broadcaster'], output='screen'),
-            ExecuteProcess(cmd=['ros2', 'control', 'load_controller', '--set-state', 'active', 'arm_controller'], output='screen'),
-            ExecuteProcess(cmd=['ros2', 'control', 'load_controller', '--set-state', 'active', 'gripper_controller'], output='screen'),
+            Node(package='controller_manager', executable='spawner',
+                 arguments=['joint_state_broadcaster', 'arm_controller', 'gripper_controller', '--activate'],
+                 parameters=[{'use_sim_time': True}], output='screen')
         ]),
     ])

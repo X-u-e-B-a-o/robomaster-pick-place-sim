@@ -87,7 +87,7 @@
 
   <gazebo>
     <plugin filename="libgz_ros2_control-system.so" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
-      <parameters>/home/nvidia/colcon_ws/src/robomaster_pick_place_sim/config/controllers.yaml</parameters>
+      <parameters>$(find robomaster_pick_place_sim)/config/controllers.yaml</parameters>
     </plugin>
   </gazebo>
 </robot>
