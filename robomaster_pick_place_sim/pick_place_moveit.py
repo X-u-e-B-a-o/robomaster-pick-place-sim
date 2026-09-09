@@ -81,7 +81,7 @@ class PickPlaceNode(Node):
     def __init__(self):
         super().__init__('pick_place_node')
         self.declare_parameter('params_file', '')
-        self.declare_parameter('use_sim_time', True)
+        # 注: use_sim_time 由 launch 文件统一传入, 这里不再 declare (否则重复声明抛异常)
 
         self.p = self._load_params()
 

@@ -6,14 +6,14 @@
 #   ~ompl.planner_configs + ~ompl.<group>.* OMPL 接口参数
 planning_plugin: ompl_interface/OMPLPlanner
 request_adapters: >-
-    default_planner_request_adapters/AddTimeParameterization
+    default_planner_request_adapters/AddTimeOptimalParameterization
     default_planner_request_adapters/ResolveConstraintFrames
     default_planner_request_adapters/FixWorkspaceBounds
     default_planner_request_adapters/FixStartStateBounds
     default_planner_request_adapters/FixStartStateCollision
     default_planner_request_adapters/FixStartStatePathConstraints
 response_adapters: >-
-    default_planning_response_adapters/AddTimeParameterization
+    default_planning_response_adapters/AddTimeOptimalParameterization
     default_planning_response_adapters/ValidateSolution
     default_planning_response_adapters/DisplayMotionPath
 planner_configs:
