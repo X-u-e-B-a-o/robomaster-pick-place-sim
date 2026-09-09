@@ -245,12 +245,15 @@ class PickPlaceNode(Node):
                           [self.p['object_size']] * 3),
         ]
         # 夹爪与目标物体之间允许接触: 手指需要框住物体侧面才能夹取,
-        # 否则 OMPL 碰撞检测会把抓取位姿判为无效
-        # (AllowedCollisionEntry.enabled 是 bool 数组, 与 entry_names 逐位对应)
+        # 否则 OMPL 碰撞检测会把抓取位姿判为无效。
+        # humble 的 AllowedCollisionMatrix 字段是 entry_values (不是 entry);
+        # enabled[j] 表示允许 entry_names[i] 与 entry_names[j] 碰撞, 长度需一致,
+        # 且 target_object 也要列进 entry_names 才能被豁免。
         acm = ps.allowed_collision_matrix
-        acm.entry_names = [EE_LINK, 'left_finger_link', 'right_finger_link']
-        acm.entry = [AllowedCollisionEntry(enabled=[True])
-                     for _ in acm.entry_names]
+        acm.entry_names = [EE_LINK, 'left_finger_link', 'right_finger_link',
+                           'target_object']
+        acm.entry_values = [AllowedCollisionEntry(enabled=[True] * 4)
+                            for _ in acm.entry_names]
         self.scene_pub.publish(ps)
 
     def _attach_object(self, attach):
