@@ -48,8 +48,101 @@
       </link>
     </model>
 
+    <!-- 桌面: 顶面高度 z = 0.30 -->
+    <model name="table">
+      <static>true</static>
+      <pose>0.75 0 0.15 0 0 0</pose>
+      <link name="table_top">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.90 0.70 0.30</size>
+            </box>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.2</mu>
+                <mu2>1.2</mu2>
+              </ode>
+            </friction>
+          </surface>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.90 0.70 0.30</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.55 0.35 0.2 1</ambient>
+            <diffuse>0.65 0.42 0.25 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 取物点 A 标记 (红色) -->
+    <model name="pick_marker">
+      <static>true</static>
+      <pose>0.60 0 0.301 0 0 0</pose>
+      <link name="pad">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.10 0.10 0.002</size>
+            </box>
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.10 0.10 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.8 0.1 0.1 1</ambient>
+            <diffuse>0.8 0.1 0.1 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 放置点 B 标记 (绿色) -->
+    <model name="place_marker">
+      <static>true</static>
+      <pose>0.35 0.30 0.301 0 0 0</pose>
+      <link name="pad">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.10 0.10 0.002</size>
+            </box>
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.10 0.10 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.7 0.2 1</ambient>
+            <diffuse>0.1 0.7 0.2 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 目标物体: 初始放在取物点 A (0.60, 0), 中心高度 0.302 + 0.035 = 0.337 -->
     <model name="target_object">
-      <pose>0.58 0 0.045 0 0 0</pose>
+      <pose>0.60 0 0.337 0 0 0</pose>
       <link name="box">
         <inertial>
           <mass>0.04</mass>
