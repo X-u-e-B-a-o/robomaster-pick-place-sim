@@ -7,17 +7,17 @@
 
 用法 (板子上, 已连机器人热点):
     cd ~/colcon_ws/src/robomaster_pick_place_sim
-    python3 real/gripper_status_sweep.py
+    python3 real/gripper_status_sweep.py [标记]
 
-需要跑两遍:
-  A. 爪子里不放东西
-  B. 第一阶段的 OPEN 期间把网球塞进爪子并扶着, 直到 CLOSE 夹住它
+标记建议用 empty / ball 区分两遍:
+  A 遍: python3 real/gripper_status_sweep.py empty   (爪子里不放东西)
+  B 遍: python3 real/gripper_status_sweep.py ball    (OPEN 阶段把网球塞进爪子并扶着)
 
 每阶段: OPEN(功率60, 2.5s) -> CLOSE(指定功率, 8s), 每 0.5s 打印状态。
-最后输出每个功率的汇总: 首次 normal 时间 / 首次 closed 时间 / 最终状态。
-
-把 A、B 两遍最后的汇总表发给开发者, 用来确定判定功率或时间阈值。
+完整输出 (含最后的汇总表) 自动保存到:
+    ~/Desktop/gripper_sweep_<标记>_<时间戳>.txt
 """
+import os
 import subprocess
 import sys
 import time
@@ -25,6 +25,13 @@ import time
 from robomaster import robot
 
 POWERS = [60, 30, 20, 10, 5]
+
+LOG_LINES = []
+
+
+def log(text):
+    print(text)
+    LOG_LINES.append(text)
 
 
 def current_wifi_ssid():
@@ -42,18 +49,21 @@ def current_wifi_ssid():
 
 
 def main():
+    label = sys.argv[1] if len(sys.argv) > 1 else "run"
+    log(f"gripper sweep label: {label}")
+
     ssid = current_wifi_ssid()
-    print(f"current wifi: {ssid!r}")
+    log(f"current wifi: {ssid!r}")
     if not ssid.startswith("RMEP"):
-        print("ERROR: 板子没连机器人热点, 不会开始测试!")
-        print("       先开机机器人, 然后执行: nmcli connection up RMEP-21bbc5")
+        log("ERROR: 板子没连机器人热点, 不会开始测试!")
+        log("       先开机机器人, 然后执行: nmcli connection up RMEP-21bbc5")
         sys.exit(1)
 
     ep = robot.Robot()
     try:
         ep.initialize(conn_type="ap")
     except Exception as e:
-        print(f"ERROR: SDK 初始化失败(机器人没开机?): {e}")
+        log(f"ERROR: SDK 初始化失败(机器人没开机?): {e}")
         sys.exit(1)
 
     last = {"v": "unknown"}
@@ -68,14 +78,14 @@ def main():
         time.sleep(0.5)
 
         for power in POWERS:
-            print(f"\n========== phase: CLOSE power={power} ==========")
-            print("(OPEN 阶段 2.5s: 如果是 B 遍, 请现在把网球塞进爪子并扶着)")
+            log(f"\n========== phase: CLOSE power={power} ==========")
+            log("(OPEN 阶段 2.5s: 如果是 ball 遍, 请现在把网球塞进爪子并扶着)")
             ep.gripper.open(power=60)
             for i in range(5):
-                print(f"  open  t={i*0.5:4.1f}s  status={last['v']}")
+                log(f"  open  t={i*0.5:4.1f}s  status={last['v']}")
                 time.sleep(0.5)
 
-            print("(CLOSE 开始, 扶着球的手可以松开了)")
+            log("(CLOSE 开始, 扶着球的手可以松开了)")
             t1 = time.time()
             ep.gripper.close(power=power)
             first_normal = None
@@ -87,19 +97,28 @@ def main():
                     first_normal = round(t, 1)
                 if v == "closed" and first_closed is None:
                     first_closed = round(t, 1)
-                print(f"  close t={t:4.1f}s  status={v}")
+                log(f"  close t={t:4.1f}s  status={v}")
                 time.sleep(0.5)
 
             results.append((power, first_normal, first_closed, str(last["v"])))
 
-        print("\n========== SUMMARY ==========")
-        print("power | first_normal(s) | first_closed(s) | final")
+        log("\n========== SUMMARY ==========")
+        log("power | first_normal(s) | first_closed(s) | final")
         for power, fn, fc, final in results:
-            print(f"  {power:>5} | {fn!s:>15} | {fc!s:>14} | {final}")
-        print("目标: 找到 空夹->closed 且 夹球->normal 的功率;")
-        print("      若没有, 对比 A/B 的 first_normal / first_closed 时间差异。")
+            log(f"  {power:>5} | {fn!s:>15} | {fc!s:>14} | {final}")
+        log("目标: 找到 空夹->closed 且 夹球->normal 的功率;")
+        log("      若没有, 对比 empty/ball 的 first_normal / first_closed 时间差异。")
 
         ep.gripper.unsub_status()
+
+        # 保存到桌面
+        desktop = os.path.expanduser("~/Desktop")
+        os.makedirs(desktop, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(desktop, f"gripper_sweep_{label}_{stamp}.txt")
+        with open(path, "w") as f:
+            f.write("\n".join(LOG_LINES) + "\n")
+        log(f"\n结果已保存: {path}")
     finally:
         try:
             ep.close()
