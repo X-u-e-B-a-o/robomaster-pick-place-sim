@@ -39,15 +39,23 @@ Open another terminal:
 
 The program runs up to 5 pick-place attempts.
 
+Grasp judgment (DJI SDK gripper status, sub_status at 5 Hz):
+- `closed`  = gripper fully closed -> no object detected -> grasp FAILED
+- `opened`  = gripper fully open
+- `normal`  = middle position -> object held -> grasp SUCCEEDED
+
 If grasp succeeds:
+- robot shows SUCCESS: armor LEDs solid green + success sound
+- per-run status published to `/real_pick_place/status` as `SUCCESS: ...`
 - place object at B point
 - keep chassis orientation
 - initialize arm again
 - start next run
+- after all runs succeed: final `SUCCESS: 全部 N/N 次抓取成功`, green LEDs stay on
 
-If grasp fails:
-- gripper is fully closed
-- object is considered not in grasp range
+If grasp fails (gripper fully closed, or status unreadable):
+- robot shows ERROR: armor LEDs flashing red + alarm sound (keeps flashing)
+- status published as `ERROR: ...` (ROS2 logger also logs at error level)
 - loop stops immediately
 - gripper opens
 - arm returns home

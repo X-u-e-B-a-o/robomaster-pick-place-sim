@@ -71,8 +71,31 @@ class RealPickPlaceNode(Node):
 
             module.step = ros_step
 
+        # 把状态发布函数注入脚本, 脚本里的 ERROR/SUCCESS 会同步到话题上
+        module.status_hook = self.publish_status
+
         self.publish_status("Starting real robot pick-place sequence")
-        module.main()
+        result = module.main()
+
+        if isinstance(result, (tuple, list)) and len(result) == 2:
+            success_count, fail_count = result
+        else:
+            success_count, fail_count = None, None
+
+        if fail_count is None:
+            self.publish_status("WARNING: script returned no result (interrupted?)")
+        elif fail_count > 0:
+            msg = (
+                f"ERROR: pick-place failed - "
+                f"success={success_count}, failed={fail_count}"
+            )
+            self.publish_status(msg)
+            self.get_logger().error(msg)
+        else:
+            msg = f"SUCCESS: all {success_count} runs succeeded"
+            self.publish_status(msg)
+            self.get_logger().info(msg)
+
         self.publish_status("Real robot pick-place sequence finished")
 
 

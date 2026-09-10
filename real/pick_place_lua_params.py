@@ -5,6 +5,7 @@ import time
 
 sys.path.insert(0, os.path.expanduser("~/RoboMaster-SDK/src"))
 
+from robomaster import led
 from robomaster import robot
 
 RUN_COUNT = 5
@@ -54,6 +55,19 @@ RETRY_PAUSE_TIME = 2.0
 
 gripper_status = {"value": "unknown"}
 
+# ROS2 包装节点(real_pick_place_ros2_node.py)会注入发布函数,
+# 使 ERROR/SUCCESS 状态同步显示到 /real_pick_place/status 话题。
+status_hook = None
+
+
+def report_status(text):
+    print(text)
+    if status_hook is not None:
+        try:
+            status_hook(text)
+        except Exception:
+            pass
+
 
 def step(attempt, number, label, sec=0.0):
     print("\n========================================")
@@ -70,6 +84,14 @@ def on_gripper_status(status):
 
 
 def is_fully_closed(status):
+    """判断夹爪是否完全闭合。
+
+    DJI SDK gripper.sub_status 回调返回字符串:
+        "closed"  夹爪完全闭合 -> 说明中间没有物体(未探测到东西)
+        "opened"  夹爪完全张开
+        "normal"  处在中间位置 -> 说明夹到了物体
+    这里同时兼容历史测试中直接传 int 的情况(2 = closed)。
+    """
     if isinstance(status, (list, tuple)) and status:
         status = status[0]
 
@@ -107,6 +129,44 @@ def safe_home(arm, gripper):
         print("Arm recenter warning:", e)
 
 
+def robot_signal_error(ep):
+    """抓取失败报错显示: 全车装甲灯红色闪烁 + 警报音效。"""
+    try:
+        ep.led.set_led(
+            comp=led.COMP_ALL, r=255, g=0, b=0,
+            effect=led.EFFECT_FLASH, freq=5,
+        )
+    except Exception as e:
+        print("Set error LED warning:", e)
+    try:
+        ep.play_sound(robot.SOUND_ID_ATTACK).wait_for_completed(timeout=3)
+    except Exception as e:
+        print("Play error sound warning:", e)
+
+
+def robot_signal_success(ep):
+    """抓取成功显示: 全车装甲灯绿色常亮 + 成功音效。"""
+    try:
+        ep.led.set_led(
+            comp=led.COMP_ALL, r=0, g=255, b=0,
+            effect=led.EFFECT_ON,
+        )
+    except Exception as e:
+        print("Set success LED warning:", e)
+    try:
+        ep.play_sound(robot.SOUND_ID_RECOGNIZED).wait_for_completed(timeout=3)
+    except Exception as e:
+        print("Play success sound warning:", e)
+
+
+def robot_signal_idle(ep):
+    """熄灭装甲灯, 恢复默认状态。"""
+    try:
+        ep.led.set_led(comp=led.COMP_ALL, effect=led.EFFECT_OFF)
+    except Exception as e:
+        print("Set idle LED warning:", e)
+
+
 def initialize_arm(attempt, arm, gripper):
     step(attempt, "0A", "RECENTER ARM")
     arm.recenter().wait_for_completed()
@@ -122,7 +182,7 @@ def initialize_arm(attempt, arm, gripper):
     time.sleep(OPEN_TIME)
 
 
-def run_once(attempt, arm, gripper, chassis):
+def run_once(attempt, ep, arm, gripper, chassis):
     initialize_arm(attempt, arm, gripper)
 
     step(attempt, 2, "CHASSIS SETTLE")
@@ -160,13 +220,28 @@ def run_once(attempt, arm, gripper, chassis):
     current_status = gripper_status["value"]
     print(f"gripper status after close: {current_status}")
 
+    # 关键判定: 夹爪完全闭合 => 未探测到物体 => 报错并退出循环
     if is_fully_closed(current_status):
-        print("抓取失败：夹爪完全闭合，说明物体不在抓取范围内。")
-        print("Stop loop and return arm home.")
+        report_status(
+            f"ERROR: RUN {attempt} 抓取失败 - 夹爪完全闭合, 未探测到物体, 停止循环"
+        )
+        robot_signal_error(ep)
         safe_home(arm, gripper)
         return False
 
-    print("抓取判断：夹爪没有完全闭合，认为已经夹到物体。")
+    # 订阅失败等异常情况拿不到状态, 无法判定 -> 按失败处理, 避免盲目继续
+    if str(current_status).strip().lower() in ("", "unknown", "none"):
+        report_status(
+            f"ERROR: RUN {attempt} 无法读取夹爪状态({current_status}), 无法判定, 停止循环"
+        )
+        robot_signal_error(ep)
+        safe_home(arm, gripper)
+        return False
+
+    report_status(
+        f"SUCCESS: RUN {attempt} 夹爪未完全闭合({current_status}), 判定已夹到物体"
+    )
+    robot_signal_success(ep)
 
     step(attempt, 11, "TEST LIFT")
     move_arm_delta(arm, 0, TEST_LIFT_MM, "small test lift", TEST_LIFT_TIME)
@@ -200,6 +275,8 @@ def run_once(attempt, arm, gripper, chassis):
 
     step(attempt, 20, "DONE - KEEP FINAL POSE")
     print("This run finished. No chassis turn-back. Next run will initialize arm again.")
+    report_status(f"SUCCESS: RUN {attempt} 抓取-放置完成")
+    robot_signal_idle(ep)
     return True
 
 
@@ -223,7 +300,7 @@ def main():
             print("Gripper status subscribe warning:", e)
 
         for attempt in range(1, RUN_COUNT + 1):
-            ok = run_once(attempt, arm, gripper, chassis)
+            ok = run_once(attempt, ep, arm, gripper, chassis)
 
             if not ok:
                 fail_count += 1
@@ -243,13 +320,28 @@ def main():
         print(f"failed: {fail_count}")
         print(f"planned runs: {RUN_COUNT}")
 
+        # 最终判定: 失败保持红灯闪烁报错, 全部成功亮绿灯报成功
+        if fail_count > 0:
+            report_status(
+                f"ERROR: 抓取失败, 循环已停止 "
+                f"(success={success_count}, failed={fail_count}, planned={RUN_COUNT})"
+            )
+            robot_signal_error(ep)
+        else:
+            report_status(f"SUCCESS: 全部 {success_count}/{RUN_COUNT} 次抓取成功")
+            robot_signal_success(ep)
+
+        return success_count, fail_count
+
     except KeyboardInterrupt:
         print("Interrupted by user.")
         safe_home(arm, gripper)
+        return None
 
     except Exception as e:
         print("Unexpected error:", e)
         safe_home(arm, gripper)
+        robot_signal_error(ep)
         raise
 
     finally:
