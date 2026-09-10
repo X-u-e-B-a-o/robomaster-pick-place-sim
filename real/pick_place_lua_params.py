@@ -26,8 +26,7 @@ FINAL_LIFT_MM = 70
 
 OPEN_POWER = 35
 GRIP_POWER = 60
-GRIP_CLOSE_PULSE_TIME = 1.5
-GRIP_PAUSE_TIME = 1.0
+GRIP_STATUS_TIMEOUT = 6.0
 
 RIGHT_TURN_DEG = -180
 TURN_SPEED_DPS = 20
@@ -103,6 +102,22 @@ def is_fully_closed(status):
     if "closed" in text and "opened" not in text:
         return True
     return False
+
+
+def wait_gripper_status(expect, timeout=GRIP_STATUS_TIMEOUT, poll=0.2):
+    """轮询等待夹爪状态进入期望集合, 超时返回最后读到的值。
+
+    5 Hz 订阅回调在后台更新 gripper_status["value"], 这里每 poll 秒读一次。
+    空夹闭合时爪子会走到机械限位 -> closed; 夹到物体时停在中间 -> normal。
+    """
+    deadline = time.time() + timeout
+    value = gripper_status["value"]
+    while time.time() < deadline:
+        value = gripper_status["value"]
+        if str(value).strip().lower() in expect:
+            return value
+        time.sleep(poll)
+    return value
 
 
 def move_arm_delta(arm, dx_mm, dy_mm, label, wait_time):
@@ -208,15 +223,16 @@ def run_once(attempt, ep, arm, gripper, chassis):
     step(attempt, 9, "CLOSE GRIPPER")
     gripper_status["value"] = "unknown"
     gripper.close(power=GRIP_POWER)
-    time.sleep(GRIP_CLOSE_PULSE_TIME)
-    try:
-        gripper.pause()
-    except Exception:
-        pass
-    time.sleep(GRIP_PAUSE_TIME)
 
+    # 注意: 不能像之前那样固定延时后 pause() —— 空夹时爪子还没走到
+    # 机械限位就被冻结在中间位置, 状态会误报 normal (误判为夹到物体)。
+    # 正确做法: 让爪子持续闭合直到状态稳定, 再判定:
+    #   closed = 空夹走到底(未探测到物体)
+    #   normal = 夹住了物体, 爪子停在中间
     step(attempt, 10, "CHECK GRIPPER CLOSED ANGLE / STATUS")
-    current_status = gripper_status["value"]
+    current_status = wait_gripper_status(
+        {"closed", "normal"}, timeout=GRIP_STATUS_TIMEOUT
+    )
     print(f"gripper status after close: {current_status}")
 
     # 关键判定: 夹爪完全闭合 => 未探测到物体 => 报错并退出循环
@@ -228,17 +244,17 @@ def run_once(attempt, ep, arm, gripper, chassis):
         safe_home(arm, gripper)
         return False
 
-    # 订阅失败等异常情况拿不到状态, 无法判定 -> 按失败处理, 避免盲目继续
-    if str(current_status).strip().lower() in ("", "unknown", "none"):
+    # 只有明确的 normal 才算夹到物体; opened/unknown/超时一律按失败处理
+    if str(current_status).strip().lower() != "normal":
         report_status(
-            f"ERROR: RUN {attempt} 无法读取夹爪状态({current_status}), 无法判定, 停止循环"
+            f"ERROR: RUN {attempt} 夹爪状态异常({current_status}), 无法确认夹到物体, 停止循环"
         )
         robot_signal_error(ep)
         safe_home(arm, gripper)
         return False
 
     report_status(
-        f"SUCCESS: RUN {attempt} 夹爪未完全闭合({current_status}), 判定已夹到物体"
+        f"SUCCESS: RUN {attempt} 夹爪停在中间位置({current_status}), 判定已夹到物体"
     )
     robot_signal_success(ep)
 

@@ -64,6 +64,15 @@ Grasp judgment (DJI SDK gripper status, sub_status at 5 Hz):
 - `opened`  = gripper fully open
 - `normal`  = middle position -> object held -> grasp SUCCEEDED
 
+Judgment procedure: after `gripper.close()`, the script polls the status for
+up to 6 s and waits for it to settle at `closed` or `normal`.
+
+IMPORTANT: do NOT call `gripper.pause()` right after close. Pausing mid-close
+freezes the jaws at a middle position, so an EMPTY close is misread as
+`normal` (false success). The close command stays active and the firmware
+stops the jaws at the mechanical limit by itself. Only an explicit `normal`
+counts as success; `opened` / unreadable / timeout all count as failure.
+
 If grasp succeeds:
 - robot shows SUCCESS: armor LEDs solid green + success sound
 - per-run status published to `/real_pick_place/status` as `SUCCESS: ...`
