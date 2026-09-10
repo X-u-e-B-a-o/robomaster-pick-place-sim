@@ -941,19 +941,7 @@
   </link>
   <link name="gripper_m_link">
 
-      
-      <inertial>
-        <origin xyz="0 0 0" rpy="0 0 0"/>
-        <mass value="0.01"/>
-        <inertia
-          ixx="0.00001"
-          ixy="0"
-          ixz="0"
-          iyy="0.00001"
-          iyz="0"
-          izz="0.00001"/>
-      </inertial>
-</link>
+      </link>
   <link name="gripper_t_link">
 
       </link>

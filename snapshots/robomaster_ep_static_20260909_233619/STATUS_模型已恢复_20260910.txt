@@ -1,0 +1,16 @@
+RoboMaster EP Gazebo 静态模型状态
+
+保存日期：2026-09-10
+
+当前状态：
+1. 车体显示正常。
+2. 机械臂主体显示正常。
+3. 前端夹爪已经恢复显示。
+4. gripper_m_link 已增加合法惯性。
+5. 夹爪 DAE 网格共 24 个。
+6. Gazebo 采用暂停方式启动，不包含 -r。
+7. 当前版本保存已确认正确的静态装配状态。
+
+已知非致命警告：
+- Collada COLOR semantic currently not supported
+- 暂停时 simulation period 显示为 0 s
