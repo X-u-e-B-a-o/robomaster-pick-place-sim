@@ -26,12 +26,16 @@ RELEASE_DOWN_MM = -80
 FINAL_LIFT_MM = 70
 
 OPEN_POWER = 35
-GRIP_POWER = 60
-# 状态稳定窗口: 同一个状态被 5Hz 推送连续保持这么长时间, 才算"停住"。
-# 空夹闭合时爪子会先经过 normal(中途) 再到 closed(机械限位),
-# 稳定窗口必须大于"路过 normal"的时长, 否则空夹会被误判成夹到物体。
+# 判定功率 (实机扫描数据: 空夹 2.5s 到底, 夹网球 1.5s 被挡进闭合区)。
+# 更低功率空夹会卡在中间走不到底, 更高功率两案时间差更小, 30 差距最大。
+GRIP_POWER = 30
+# 闭合速度阈值: closed 在这个时间内到达 = 被物体挡停 = 夹到物体;
+# 更慢才到 = 走满全程到机械限位 = 空夹。
+GRIP_CLOSED_FAST = 2.0
+# 刚性物体(如方块)会把爪子停在中间 normal 不再前进:
+# normal 连续保持这么久也判为夹到物体 (球不会走这个分支)。
 GRIP_STABLE_TIME = 2.5
-# 闭合后等待状态稳定的最长总时间; 超时按失败处理。
+# 闭合后等待判定的最长总时间; 超时按失败处理。
 GRIP_STATUS_TIMEOUT = 8.0
 
 RIGHT_TURN_DEG = -180
@@ -103,55 +107,68 @@ def on_gripper_status(status):
     gripper_status["ts"] = time.time()
 
 
-def is_fully_closed(status):
-    """判断夹爪是否完全闭合。
+def close_and_judge(gripper):
+    """闭合夹爪并判定是否夹到物体, 返回 (success, detail)。
 
-    DJI SDK gripper.sub_status 回调返回字符串:
-        "closed"  夹爪完全闭合 -> 说明中间没有物体(未探测到东西)
-        "opened"  夹爪完全张开
-        "normal"  处在中间位置 -> 说明夹到了物体
-    这里同时兼容历史测试中直接传 int 的情况(2 = closed)。
+    判据来自实机功率-状态扫描数据 (GRIP_POWER=30):
+      1. status 到达 "closed" 用时 <= GRIP_CLOSED_FAST (2.0s)
+         -> 物体挡在行程中间, 爪子提前进入闭合区 -> 夹到物体
+            (实测: 夹网球 1.5s)
+      2. status 到达 "closed" 用时 > GRIP_CLOSED_FAST
+         -> 爪子走满全程到机械限位 -> 未夹到 (实测: 空夹 2.5s)
+      3. status 稳定在 "normal" 持续 GRIP_STABLE_TIME 且从未 closed
+         -> 物体把爪子停在中间 -> 夹到物体 (刚性方块走这个分支)
+      4. 超时 / 无推送 -> 无法判定 -> 失败
+
+    注意: 不要在中途 pause() —— 空夹时爪子还没走到限位就被冻结在
+    中间位置, 状态会停在 normal 被误判为夹到物体。
     """
-    if isinstance(status, (list, tuple)) and status:
-        status = status[0]
+    gripper_status["value"] = "unknown"
+    gripper_status["ts"] = 0.0
+    gripper.close(power=GRIP_POWER)
 
-    if isinstance(status, int):
-        return status == 2
+    t0 = time.time()
+    deadline = t0 + GRIP_STATUS_TIMEOUT
+    last = None
+    stable_since = None
 
-    text = str(status).lower()
-    if text in ("2", "closed", "close", "fully_closed"):
-        return True
-    if "closed" in text and "opened" not in text:
-        return True
-    return False
-
-
-def wait_gripper_status(stable_time=GRIP_STABLE_TIME,
-                        timeout=GRIP_STATUS_TIMEOUT, poll=0.2):
-    """等待夹爪状态稳定, 返回稳定后的状态值。
-
-    5 Hz 订阅回调在后台更新 gripper_status["value"] 和 ["ts"]。
-    空夹闭合时爪子会先经过 normal(中途位置) 再到 closed(机械限位),
-    夹到物体时则停在 normal。因此不能见到 normal 就判定成功,
-    必须等同一个状态被连续推送 stable_time 秒(稳定窗口), 区分
-    "路过 normal"和"停在 normal"。
-
-    返回:
-        "closed"  空夹走到底(未探测到物体)
-        "normal"  夹住了物体, 爪子停在中间
-        "opened"/"unknown"/其他 -> 调用方按失败处理
-    超时(或订阅从未推送)返回最后读到的值。
-    """
-    deadline = time.time() + timeout
     while True:
         now = time.time()
+        v = str(gripper_status["value"]).strip().lower()
         ts = gripper_status.get("ts", 0.0)
-        # ts>0 说明至少收到过一次推送; 同一状态持续 stable_time 秒即稳定
-        if ts > 0 and now - ts >= stable_time:
-            return gripper_status["value"]
+
+        # 判据 1/2: closed 到达时间
+        if v == "closed":
+            elapsed = now - t0
+            if elapsed <= GRIP_CLOSED_FAST:
+                return True, (
+                    f"快速闭合({elapsed:.1f}s <= {GRIP_CLOSED_FAST}s), "
+                    f"判定夹到物体"
+                )
+            return False, (
+                f"缓慢闭合({elapsed:.1f}s > {GRIP_CLOSED_FAST}s), "
+                f"走满行程, 未夹到物体"
+            )
+
+        # 判据 3: normal 持续稳定 (要求推送仍在流动, ts 新鲜)
+        if v != last:
+            last = v
+            stable_since = now
+        elif (v == "normal" and stable_since is not None
+              and now - stable_since >= GRIP_STABLE_TIME
+              and ts > 0 and now - ts < 1.0):
+            return True, (
+                f"夹爪稳定停在中间位置 normal({GRIP_STABLE_TIME}s), "
+                f"判定夹到物体"
+            )
+
         if now >= deadline:
-            return gripper_status["value"]
-        time.sleep(poll)
+            return False, (
+                f"超时({GRIP_STATUS_TIMEOUT}s)未得到稳定判定, "
+                f"最后状态 {gripper_status['value']}"
+            )
+
+        time.sleep(0.2)
 
 
 def move_arm_delta(arm, dx_mm, dy_mm, label, wait_time):
@@ -255,40 +272,21 @@ def run_once(attempt, ep, arm, gripper, chassis):
     time.sleep(GRASP_HEIGHT_PAUSE_TIME)
 
     step(attempt, 9, "CLOSE GRIPPER")
-    gripper_status["value"] = "unknown"
-    gripper_status["ts"] = 0.0
-    gripper.close(power=GRIP_POWER)
+    step(attempt, 10, "JUDGE GRASP BY CLOSE TIME")
+    ok, detail = close_and_judge(gripper)
+    print(f"gripper close judgment: ok={ok}, detail={detail}")
 
-    # 注意: 不能像之前那样固定延时后 pause() —— 空夹时爪子还没走到
-    # 机械限位就被冻结在中间位置, 状态会误报 normal (误判为夹到物体)。
-    # 正确做法: 让爪子持续闭合, 等状态稳定(见 wait_gripper_status)再判定:
-    #   closed = 空夹走到底(未探测到物体)
-    #   normal = 夹住了物体, 爪子停在中间
-    step(attempt, 10, "CHECK GRIPPER CLOSED ANGLE / STATUS")
-    current_status = wait_gripper_status()
-    print(f"gripper status after close: {current_status}")
-
-    # 关键判定: 夹爪完全闭合 => 未探测到物体 => 报错并退出循环
-    if is_fully_closed(current_status):
+    # 关键判定: close_and_judge 按"闭合速度"区分夹到物体与空夹
+    # (见函数 docstring)。未夹到 => 报错并退出循环。
+    if not ok:
         report_status(
-            f"ERROR: RUN {attempt} 抓取失败 - 夹爪完全闭合, 未探测到物体, 停止循环"
+            f"ERROR: RUN {attempt} 抓取失败 - {detail}, 停止循环"
         )
         robot_signal_error(ep)
         safe_home(arm, gripper)
         return False
 
-    # 只有明确的 normal 才算夹到物体; opened/unknown/超时一律按失败处理
-    if str(current_status).strip().lower() != "normal":
-        report_status(
-            f"ERROR: RUN {attempt} 夹爪状态异常({current_status}), 无法确认夹到物体, 停止循环"
-        )
-        robot_signal_error(ep)
-        safe_home(arm, gripper)
-        return False
-
-    report_status(
-        f"SUCCESS: RUN {attempt} 夹爪停在中间位置({current_status}), 判定已夹到物体"
-    )
+    report_status(f"SUCCESS: RUN {attempt} {detail}")
     robot_signal_success(ep)
 
     step(attempt, 11, "TEST LIFT")
