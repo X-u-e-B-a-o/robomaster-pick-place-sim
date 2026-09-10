@@ -425,4 +425,11 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys
+
+    # 可选: python3 real/pick_place_lua_params.py <grip_power>
+    # 用于在真机上快速测试不同闭合功率 (不经过 ROS2 节点)
+    if len(sys.argv) > 1:
+        GRIP_POWER = int(sys.argv[1])
+        print(f"grip power overridden from command line: {GRIP_POWER}")
     main()
