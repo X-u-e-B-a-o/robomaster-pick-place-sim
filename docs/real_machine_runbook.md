@@ -32,10 +32,20 @@ git clone https://github.com/dji-sdk/RoboMaster-SDK.git
 pip3 install --user ./RoboMaster-SDK
 
 # 2.4 打 libmedia_codec 存根 (SDK media.py 在模块级 import 视频解码库,
-#     aarch64 无对应 .so; 本实验无视觉需求, 空模块即可满足导入).
-#     放到 site-packages 使任何 shell 下都生效:
-printf '# RoboMaster SDK libmedia_codec 存根: 本实验不使用视频功能\n' \
-  > ~/.local/lib/python3.10/site-packages/libmedia_codec.py
+#     aarch64 无对应 .so). 注意: LiveView.__init__ 会真正实例化
+#     H264Decoder()/OpusDecoder(), 所以存根必须提供这两个空类, 只放注释会
+#     AttributeError: no attribute 'H264Decoder'. 放到 site-packages 使任何
+#     shell 下都生效:
+cat > ~/.local/lib/python3.10/site-packages/libmedia_codec.py << 'EOF'
+# RoboMaster SDK libmedia_codec 存根: aarch64 无 .so, 本实验不用视频流.
+class H264Decoder:
+    def __init__(self, *a, **k): pass
+    def decode(self, d): return []
+
+class OpusDecoder:
+    def __init__(self, *a, **k): pass
+    def decode(self, d): return []
+EOF
 
 # 2.5 构建 (依赖 MoveIt 等来自 ~/colcon_ws, 需先 source 其 install)
 source /opt/ros/humble/setup.bash
