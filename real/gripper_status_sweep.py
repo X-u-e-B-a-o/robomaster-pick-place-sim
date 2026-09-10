@@ -48,32 +48,47 @@ def current_wifi_ssid():
     return ""
 
 
+def save_log(label):
+    """把 LOG_LINES 存到桌面, 无论跑完还是报错都会调用。"""
+    try:
+        desktop = os.path.expanduser("~/Desktop")
+        os.makedirs(desktop, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(desktop, f"gripper_sweep_{label}_{stamp}.txt")
+        with open(path, "w") as f:
+            f.write("\n".join(LOG_LINES) + "\n")
+        print(f"日志已保存: {path}")
+    except Exception as e:
+        print(f"保存日志失败: {e}")
+
+
 def main():
     label = sys.argv[1] if len(sys.argv) > 1 else "run"
     log(f"gripper sweep label: {label}")
 
-    ssid = current_wifi_ssid()
-    log(f"current wifi: {ssid!r}")
-    if not ssid.startswith("RMEP"):
-        log("ERROR: 板子没连机器人热点, 不会开始测试!")
-        log("       先开机机器人, 然后执行: nmcli connection up RMEP-21bbc5")
-        sys.exit(1)
-
-    ep = robot.Robot()
+    ep = None
     try:
-        ep.initialize(conn_type="ap")
-    except Exception as e:
-        log(f"ERROR: SDK 初始化失败(机器人没开机?): {e}")
-        sys.exit(1)
+        ssid = current_wifi_ssid()
+        log(f"current wifi: {ssid!r}")
+        if not ssid.startswith("RMEP"):
+            log("ERROR: 板子没连机器人热点, 不会开始测试!")
+            log("       先开机机器人, 然后执行: nmcli connection up RMEP-21bbc5")
+            sys.exit(1)
 
-    last = {"v": "unknown"}
+        ep = robot.Robot()
+        try:
+            ep.initialize(conn_type="ap")
+        except Exception as e:
+            log(f"ERROR: SDK 初始化失败(机器人没开机?): {e}")
+            sys.exit(1)
 
-    def cb(s):
-        last["v"] = s
+        last = {"v": "unknown"}
 
-    results = []
+        def cb(s):
+            last["v"] = s
 
-    try:
+        results = []
+
         ep.gripper.sub_status(freq=5, callback=cb)
         time.sleep(0.5)
 
@@ -110,20 +125,14 @@ def main():
         log("      若没有, 对比 empty/ball 的 first_normal / first_closed 时间差异。")
 
         ep.gripper.unsub_status()
-
-        # 保存到桌面
-        desktop = os.path.expanduser("~/Desktop")
-        os.makedirs(desktop, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(desktop, f"gripper_sweep_{label}_{stamp}.txt")
-        with open(path, "w") as f:
-            f.write("\n".join(LOG_LINES) + "\n")
-        log(f"\n结果已保存: {path}")
     finally:
-        try:
-            ep.close()
-        except Exception as e:
-            print("close warning:", e)
+        # 无论成功还是中途报错, 都保存日志再关连接
+        save_log(label)
+        if ep is not None:
+            try:
+                ep.close()
+            except Exception as e:
+                print("close warning:", e)
 
 
 if __name__ == "__main__":
