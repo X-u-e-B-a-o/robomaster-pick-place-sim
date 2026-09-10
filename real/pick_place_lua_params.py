@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-import os
-import sys
 import time
 
-sys.path.insert(0, os.path.expanduser("~/RoboMaster-SDK/src"))
-
+# 注意: 使用 pip 安装的官方 SDK (pip3 install --user ./RoboMaster-SDK)。
+# 不要往 sys.path 插 ~/RoboMaster-SDK/src —— 板子上那份源码树版本混乱
+# (client.py 引用不存在的 config.DEFAULT_CONN_PROTO), 会导致连接失败。
 from robomaster import led
 from robomaster import robot
 

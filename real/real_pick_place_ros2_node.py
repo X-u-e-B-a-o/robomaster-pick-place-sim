@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
 import os
-import sys
 import traceback
 
 import rclpy
@@ -33,11 +32,9 @@ class RealPickPlaceNode(Node):
 
     def run_pick_place_script(self):
         script_path = self.get_parameter("script_path").value
-        sdk_path = os.path.expanduser("~/RoboMaster-SDK/src")
 
-        if sdk_path not in sys.path:
-            sys.path.insert(0, sdk_path)
-
+        # 注意: 不要往 sys.path 插 ~/RoboMaster-SDK/src —— 板子上那份源码树
+        # 版本混乱, 会导致 SDK 连接失败; 用 pip 安装的官方 SDK 即可。
         if not os.path.exists(script_path):
             raise FileNotFoundError(script_path)
 

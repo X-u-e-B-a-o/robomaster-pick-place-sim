@@ -19,7 +19,12 @@ This folder contains the real RoboMaster EP/Core pick-place experiment files.
 ## Run Directly
 
     cd ~/colcon_ws/src/robomaster_pick_place_sim
-    PYTHONPATH=$HOME/RoboMaster-SDK/src python3 real/pick_place_lua_params.py
+    python3 real/pick_place_lua_params.py
+
+The script uses the pip-installed official SDK (`pip3 install --user ./RoboMaster-SDK`).
+Do NOT prepend `~/RoboMaster-SDK/src` to PYTHONPATH — that source tree on the
+Jetson is a mixed-version snapshot whose `client.py` references a nonexistent
+`config.DEFAULT_CONN_PROTO` and breaks the connection.
 
 ## Run With ROS2
 
