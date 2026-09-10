@@ -12,7 +12,12 @@ from std_msgs.msg import String
 class RealPickPlaceNode(Node):
     def __init__(self):
         super().__init__("real_pick_place_node")
-        self.status_pub = self.create_publisher(String, "/real_pick_place/status", 10)
+
+        self.status_pub = self.create_publisher(
+            String,
+            "/real_pick_place/status",
+            10,
+        )
 
         default_script = os.path.expanduser(
             "~/colcon_ws/src/robomaster_pick_place_sim/real/pick_place_lua_params.py"
@@ -21,9 +26,9 @@ class RealPickPlaceNode(Node):
 
     def publish_status(self, text):
         msg = String()
-        msg.data = text
+        msg.data = str(text)
         self.status_pub.publish(msg)
-        self.get_logger().info(text)
+        self.get_logger().info(str(text))
         rclpy.spin_once(self, timeout_sec=0.05)
 
     def run_pick_place_script(self):
@@ -38,16 +43,31 @@ class RealPickPlaceNode(Node):
 
         self.publish_status(f"Loading real script: {script_path}")
 
-        spec = importlib.util.spec_from_file_location("real_pick_place_script", script_path)
+        spec = importlib.util.spec_from_file_location(
+            "real_pick_place_script",
+            script_path,
+        )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
         original_step = getattr(module, "step", None)
 
         if original_step is not None:
-            def ros_step(label, sec=0.0):
-                self.publish_status(label)
-                return original_step(label, sec)
+
+            def ros_step(*args, **kwargs):
+                if len(args) >= 3:
+                    attempt = args[0]
+                    step_number = args[1]
+                    label = args[2]
+                    run_count = getattr(module, "RUN_COUNT", "?")
+                    status_text = f"RUN {attempt}/{run_count} | STEP {step_number}: {label}"
+                elif len(args) >= 1:
+                    status_text = str(args[0])
+                else:
+                    status_text = "STEP"
+
+                self.publish_status(status_text)
+                return original_step(*args, **kwargs)
 
             module.step = ros_step
 
@@ -62,12 +82,15 @@ def main():
 
     try:
         node.run_pick_place_script()
+
     except KeyboardInterrupt:
         node.publish_status("Interrupted by user")
+
     except Exception:
         node.publish_status("Real robot pick-place failed")
         node.get_logger().error(traceback.format_exc())
         raise
+
     finally:
         node.destroy_node()
         rclpy.shutdown()

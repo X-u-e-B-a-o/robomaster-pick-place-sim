@@ -7,17 +7,15 @@ sys.path.insert(0, os.path.expanduser("~/RoboMaster-SDK/src"))
 
 from robomaster import robot
 
-# ===== Initial arm pose after recenter =====
+RUN_COUNT = 5
+
 INIT_X_MM = 120
 INIT_Y_MM = 120
 INIT_SETTLE_TIME = 1.0
 
-# ===== Lua parameters converted to real robot mm / degrees =====
 EXTRA_FORWARD_MM = 30
-
 COARSE_FORWARD_MM = 60
 COARSE_DOWN_MM = -240
-
 FINAL_FORWARD_MM = 6
 FINAL_DOWN_MM = -24
 
@@ -52,21 +50,160 @@ GROUND_PAUSE_TIME = 1.2
 RELEASE_TIME = 1.5
 FINAL_LIFT_TIME = 1.5
 
-def step(label, sec=0.0):
+RETRY_PAUSE_TIME = 2.0
+
+gripper_status = {"value": "unknown"}
+
+
+def step(attempt, number, label, sec=0.0):
     print("\n========================================")
-    print(label)
+    print(f"RUN {attempt}/{RUN_COUNT} | STEP {number}: {label}")
     print("========================================")
     if sec > 0:
         time.sleep(sec)
+
+
+def on_gripper_status(status):
+    if isinstance(status, (list, tuple)) and status:
+        status = status[0]
+    gripper_status["value"] = status
+
+
+def is_fully_closed(status):
+    if isinstance(status, (list, tuple)) and status:
+        status = status[0]
+
+    if isinstance(status, int):
+        return status == 2
+
+    text = str(status).lower()
+    if text in ("2", "closed", "close", "fully_closed"):
+        return True
+    if "closed" in text and "opened" not in text:
+        return True
+    return False
+
 
 def move_arm_delta(arm, dx_mm, dy_mm, label, wait_time):
     print(f"{label}: arm.move x={dx_mm} mm, y={dy_mm} mm")
     arm.move(x=dx_mm, y=dy_mm).wait_for_completed()
     time.sleep(wait_time)
 
-def main():
-    completed = False
 
+def safe_home(arm, gripper):
+    print("\n========================================")
+    print("SAFE HOME: open gripper and recenter arm")
+    print("========================================")
+    try:
+        gripper.open(power=OPEN_POWER)
+        time.sleep(1.0)
+    except Exception as e:
+        print("Open gripper warning:", e)
+
+    try:
+        arm.recenter().wait_for_completed()
+        time.sleep(2.0)
+    except Exception as e:
+        print("Arm recenter warning:", e)
+
+
+def initialize_arm(attempt, arm, gripper):
+    step(attempt, "0A", "RECENTER ARM")
+    arm.recenter().wait_for_completed()
+    time.sleep(2.0)
+
+    step(attempt, "0B", "MOVE TO INITIAL ARM POSE")
+    print(f"initial pose: arm.moveto x={INIT_X_MM} mm, y={INIT_Y_MM} mm")
+    arm.moveto(x=INIT_X_MM, y=INIT_Y_MM).wait_for_completed()
+    time.sleep(INIT_SETTLE_TIME)
+
+    step(attempt, 1, "OPEN GRIPPER")
+    gripper.open(power=OPEN_POWER)
+    time.sleep(OPEN_TIME)
+
+
+def run_once(attempt, arm, gripper, chassis):
+    initialize_arm(attempt, arm, gripper)
+
+    step(attempt, 2, "CHASSIS SETTLE")
+    time.sleep(CHASSIS_SETTLE_TIME)
+
+    step(attempt, 3, "FIRST FORWARD ALIGNMENT")
+    move_arm_delta(arm, EXTRA_FORWARD_MM, 0, "forward alignment", FORWARD_MOVE_TIME)
+
+    step(attempt, 4, "FORWARD SETTLE")
+    time.sleep(FORWARD_SETTLE_TIME)
+
+    step(attempt, 5, "FORWARD-LEANING COARSE DESCENT")
+    move_arm_delta(arm, COARSE_FORWARD_MM, COARSE_DOWN_MM, "lean forward and down", COARSE_MOVE_TIME)
+
+    step(attempt, 6, "PAUSE BEFORE FINAL APPROACH")
+    time.sleep(COARSE_SETTLE_TIME)
+
+    step(attempt, 7, "FINAL FORWARD-LEANING DESCENT")
+    move_arm_delta(arm, FINAL_FORWARD_MM, FINAL_DOWN_MM, "final forward and down", FINAL_MOVE_TIME)
+
+    step(attempt, 8, "AT GRASP POSITION")
+    time.sleep(GRASP_HEIGHT_PAUSE_TIME)
+
+    step(attempt, 9, "CLOSE GRIPPER")
+    gripper_status["value"] = "unknown"
+    gripper.close(power=GRIP_POWER)
+    time.sleep(GRIP_CLOSE_PULSE_TIME)
+    try:
+        gripper.pause()
+    except Exception:
+        pass
+    time.sleep(GRIP_PAUSE_TIME)
+
+    step(attempt, 10, "CHECK GRIPPER CLOSED ANGLE / STATUS")
+    current_status = gripper_status["value"]
+    print(f"gripper status after close: {current_status}")
+
+    if is_fully_closed(current_status):
+        print("抓取失败：夹爪完全闭合，说明物体不在抓取范围内。")
+        print("Stop loop and return arm home.")
+        safe_home(arm, gripper)
+        return False
+
+    print("抓取判断：夹爪没有完全闭合，认为已经夹到物体。")
+
+    step(attempt, 11, "TEST LIFT")
+    move_arm_delta(arm, 0, TEST_LIFT_MM, "small test lift", TEST_LIFT_TIME)
+
+    step(attempt, 12, "CHECK REAL GRASP")
+    print("Check visually whether the cube moved with the gripper.")
+    time.sleep(TEST_SETTLE_TIME)
+
+    step(attempt, 13, "MAIN LIFT")
+    move_arm_delta(arm, 0, MAIN_LIFT_MM, "main lift", MAIN_LIFT_TIME)
+
+    step(attempt, 14, "SETTLE BEFORE TURN")
+    time.sleep(BEFORE_TURN_TIME)
+
+    step(attempt, 15, "RIGHT TURN TO PLACE AREA")
+    chassis.move(x=0, y=0, z=RIGHT_TURN_DEG, z_speed=TURN_SPEED_DPS).wait_for_completed()
+    time.sleep(AFTER_TURN_TIME)
+
+    step(attempt, 16, "LOWER CUBE AT B POINT")
+    move_arm_delta(arm, 0, RELEASE_DOWN_MM, "lower cube", LOWER_TIME)
+
+    step(attempt, 17, "GROUND SETTLE")
+    time.sleep(GROUND_PAUSE_TIME)
+
+    step(attempt, 18, "RELEASE CUBE")
+    gripper.open(power=OPEN_POWER)
+    time.sleep(RELEASE_TIME)
+
+    step(attempt, 19, "LIFT ARM AWAY")
+    move_arm_delta(arm, 0, FINAL_LIFT_MM, "lift away", FINAL_LIFT_TIME)
+
+    step(attempt, 20, "DONE - KEEP FINAL POSE")
+    print("This run finished. No chassis turn-back. Next run will initialize arm again.")
+    return True
+
+
+def main():
     print("Connecting RoboMaster...")
     ep = robot.Robot()
     ep.initialize(conn_type="ap")
@@ -75,96 +212,53 @@ def main():
     gripper = ep.gripper
     chassis = ep.chassis
 
+    success_count = 0
+    fail_count = 0
+
     try:
-        step("STEP 0A: RECENTER ARM")
-        arm.recenter().wait_for_completed()
-        time.sleep(2)
+        try:
+            gripper.sub_status(freq=5, callback=on_gripper_status)
+            time.sleep(0.5)
+        except Exception as e:
+            print("Gripper status subscribe warning:", e)
 
-        step("STEP 0B: MOVE TO INITIAL ARM POSE")
-        print(f"initial pose: arm.moveto x={INIT_X_MM} mm, y={INIT_Y_MM} mm")
-        arm.moveto(x=INIT_X_MM, y=INIT_Y_MM).wait_for_completed()
-        time.sleep(INIT_SETTLE_TIME)
+        for attempt in range(1, RUN_COUNT + 1):
+            ok = run_once(attempt, arm, gripper, chassis)
 
-        step("STEP 1: OPEN GRIPPER")
-        gripper.open(power=OPEN_POWER)
-        time.sleep(OPEN_TIME)
+            if not ok:
+                fail_count += 1
+                print("Loop stopped because grasp failed.")
+                break
 
-        step("STEP 2: CHASSIS SETTLE")
-        time.sleep(CHASSIS_SETTLE_TIME)
+            success_count += 1
 
-        step("STEP 3: FIRST FORWARD ALIGNMENT")
-        move_arm_delta(arm, EXTRA_FORWARD_MM, 0, "forward alignment", FORWARD_MOVE_TIME)
+            if attempt < RUN_COUNT:
+                print(f"Run {attempt} success. Prepare object, then next run starts.")
+                time.sleep(RETRY_PAUSE_TIME)
 
-        step("STEP 4: FORWARD SETTLE")
-        time.sleep(FORWARD_SETTLE_TIME)
+        print("\n========================================")
+        print("FINAL RESULT")
+        print("========================================")
+        print(f"success: {success_count}")
+        print(f"failed: {fail_count}")
+        print(f"planned runs: {RUN_COUNT}")
 
-        step("STEP 5: FORWARD-LEANING COARSE DESCENT")
-        move_arm_delta(arm, COARSE_FORWARD_MM, COARSE_DOWN_MM, "lean forward and down", COARSE_MOVE_TIME)
+    except KeyboardInterrupt:
+        print("Interrupted by user.")
+        safe_home(arm, gripper)
 
-        step("STEP 6: PAUSE BEFORE FINAL APPROACH")
-        time.sleep(COARSE_SETTLE_TIME)
-
-        step("STEP 7: FINAL FORWARD-LEANING DESCENT")
-        move_arm_delta(arm, FINAL_FORWARD_MM, FINAL_DOWN_MM, "final forward and down", FINAL_MOVE_TIME)
-
-        step("STEP 8: AT GRASP POSITION")
-        time.sleep(GRASP_HEIGHT_PAUSE_TIME)
-
-        step("STEP 9: CLOSE GRIPPER")
-        gripper.close(power=GRIP_POWER)
-        time.sleep(GRIP_CLOSE_PULSE_TIME)
-
-        step("STEP 10: PAUSE GRIPPER")
-        time.sleep(GRIP_PAUSE_TIME)
-
-        step("STEP 11: TEST LIFT")
-        move_arm_delta(arm, 0, TEST_LIFT_MM, "small test lift", TEST_LIFT_TIME)
-
-        step("STEP 12: CHECK REAL GRASP")
-        print("Check visually whether the cube moved with the gripper.")
-        time.sleep(TEST_SETTLE_TIME)
-
-        step("STEP 13: MAIN LIFT")
-        move_arm_delta(arm, 0, MAIN_LIFT_MM, "main lift", MAIN_LIFT_TIME)
-
-        step("STEP 14: SETTLE BEFORE TURN")
-        time.sleep(BEFORE_TURN_TIME)
-
-        step("STEP 15: RIGHT TURN TO PLACE AREA")
-        chassis.move(x=0, y=0, z=RIGHT_TURN_DEG, z_speed=TURN_SPEED_DPS).wait_for_completed()
-        time.sleep(AFTER_TURN_TIME)
-
-        step("STEP 16: LOWER CUBE AT B POINT")
-        move_arm_delta(arm, 0, RELEASE_DOWN_MM, "lower cube", LOWER_TIME)
-
-        step("STEP 17: GROUND SETTLE")
-        time.sleep(GROUND_PAUSE_TIME)
-
-        step("STEP 18: RELEASE CUBE")
-        gripper.open(power=OPEN_POWER)
-        time.sleep(RELEASE_TIME)
-
-        step("STEP 19: LIFT ARM AWAY")
-        move_arm_delta(arm, 0, FINAL_LIFT_MM, "lift away", FINAL_LIFT_TIME)
-
-        step("STEP 20: DONE - KEEP FINAL POSE")
-        print("Pick-place sequence finished. Robot keeps final pose after B point.")
-        completed = True
+    except Exception as e:
+        print("Unexpected error:", e)
+        safe_home(arm, gripper)
+        raise
 
     finally:
-        if completed:
-            print("Closing connection without returning home.")
-            ep.close()
-        else:
-            print("Interrupted or failed. Safe cleanup: open gripper and recenter arm.")
-            try:
-                gripper.open(power=OPEN_POWER)
-                time.sleep(1)
-                arm.recenter().wait_for_completed()
-            except Exception as e:
-                print("Cleanup warning:", e)
-            ep.close()
+        try:
+            gripper.unsub_status()
+        except Exception:
+            pass
+        ep.close()
+
 
 if __name__ == "__main__":
     main()
-
