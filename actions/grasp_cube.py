@@ -28,6 +28,7 @@ from std_msgs.msg import Float64MultiArray, String
 
 
 WORLD_CONTROL_SERVICE = "/world/pick_place/control"
+ACTION_VERSION = "2026-09-10-slender-high-friction-v9"
 BROADCASTER = "joint_state_broadcaster"
 HOLD_CONTROLLER = "robomaster_position_hold_controller"
 HOLD_TOPIC = f"/{HOLD_CONTROLLER}/commands"
@@ -85,36 +86,52 @@ class GraspCubeAction(Node):
 
         # 相对当前标定姿态的对称转角。正的 open_offset 增大开口；
         # 正的 close_offset 从标定姿态向内闭合。
-        self.declare_parameter("open_offset", 0.20)
+        # 对照实机完全张开照片：根连杆应接近 80 度。夹爪根关节是
+        # continuous，因此用 0.70 rad 作为本动作的软件最大开度。
+        self.declare_parameter("open_offset", 0.70)
         # 闭合时回到已经调好的标定角，不再额外向内压，避免穿模。
         self.declare_parameter("close_offset", 0.00)
         self.declare_parameter("run_count", 1)
         self.declare_parameter("spawn_test_cube", True)
         self.declare_parameter("cube_name", "grasp_test_cube")
-        self.declare_parameter("cube_size", 0.05)
-        self.declare_parameter("cube_mass", 0.05)
-        self.declare_parameter("cube_x", 0.30)
+        self.declare_parameter("cube_length", 0.05)
+        self.declare_parameter("cube_width", 0.05)
+        self.declare_parameter("cube_height", 0.12)
+        self.declare_parameter("cube_mass", 0.20)
+        self.declare_parameter("cube_friction", 5.0)
+        # 柱体前后位置参数；运行时可用 --ros-args -p cube_x:=VALUE 覆盖。
+        self.declare_parameter("cube_x", 0.35)
         self.declare_parameter("cube_y", 0.0)
-        self.declare_parameter("cube_z", 0.026)
-        self.declare_parameter("motion_frames", 30)
+        # 12 cm 高柱体的中心位于 6 cm 处，另加 1 mm 离地余量。
+        self.declare_parameter("cube_z", 0.061)
+        # 原来每段动作 30 帧、共 750 个仿真步，实测约 15 秒。
+        # 改为 6 帧、共 150 步，动作速度提高约 5 倍。
+        self.declare_parameter("motion_frames", 6)
         self.declare_parameter("steps_per_frame", 25)
-        self.declare_parameter("settle_steps", 100)
-        self.declare_parameter("cycle_pause_seconds", 2.0)
-        self.declare_parameter("arm_extend_delta", 0.90)
+        # 夹爪单独使用更细、更慢的插值，防止夹紧冲击把方块挤出去。
+        self.declare_parameter("gripper_motion_frames", 20)
+        self.declare_parameter("gripper_steps_per_frame", 10)
+        self.declare_parameter("gripper_settle_steps", 150)
+        self.declare_parameter("settle_steps", 25)
+        self.declare_parameter("cycle_pause_seconds", 0.5)
+        # arm_1_joint 的模型上限为 1.384 rad；1.38 rad 是本动作的
+        # 最低位置，仅保留约 0.004 rad 防止浮点误差越过硬限位。
+        self.declare_parameter("arm_extend_delta", 1.38)
         self.declare_parameter("arm_initial_fraction", 0.45)
         self.declare_parameter("arm_alignment_fraction", 0.58)
         self.declare_parameter("arm_coarse_fraction", 0.92)
-        self.declare_parameter("arm_test_lift_delta", 0.82)
-        self.declare_parameter("arm_lift_delta", 0.70)
-        self.declare_parameter("arm_2_delta", -0.90)
+        self.declare_parameter("arm_test_lift_delta", 1.22)
+        self.declare_parameter("arm_lift_delta", 0.95)
+        self.declare_parameter("arm_2_delta", -1.38)
         self.declare_parameter("wheel_speed", 3.0)
-        # r=0.05 m、左右轮中心距=0.20 m、仿真步长=0.001 s 时，
-        # 3 rad/s 的左右反向轮速转半圈理论上约需 2094 步。
-        self.declare_parameter("turn_steps", 2100)
+        # 实测 2100 步明显过转，因此按 1050 步校准约 180 度。
+        # 拆成短请求可避免单次 2100 步导致 Ignition service 超时。
+        self.declare_parameter("turn_steps", 1050)
         self.declare_parameter("turn_chunk_steps", 150)
         self.declare_parameter("world_service_timeout_ms", 15000)
+        self.declare_parameter("turn_service_timeout_ms", 30000)
         self.declare_parameter("step_retries", 2)
-        self.declare_parameter("stop_on_empty_grasp", False)
+        self.declare_parameter("stop_on_empty_grasp", True)
         self.declare_parameter("grasp_position_tolerance", 0.02)
         self.declare_parameter("controller_timeout_seconds", 20.0)
 
@@ -125,13 +142,27 @@ class GraspCubeAction(Node):
             self.get_parameter("spawn_test_cube").value
         )
         self.cube_name = str(self.get_parameter("cube_name").value)
-        self.cube_size = float(self.get_parameter("cube_size").value)
+        self.cube_length = float(self.get_parameter("cube_length").value)
+        self.cube_width = float(self.get_parameter("cube_width").value)
+        self.cube_height = float(self.get_parameter("cube_height").value)
         self.cube_mass = float(self.get_parameter("cube_mass").value)
+        self.cube_friction = float(
+            self.get_parameter("cube_friction").value
+        )
         self.cube_x = float(self.get_parameter("cube_x").value)
         self.cube_y = float(self.get_parameter("cube_y").value)
         self.cube_z = float(self.get_parameter("cube_z").value)
         self.motion_frames = int(self.get_parameter("motion_frames").value)
         self.steps_per_frame = int(self.get_parameter("steps_per_frame").value)
+        self.gripper_motion_frames = int(
+            self.get_parameter("gripper_motion_frames").value
+        )
+        self.gripper_steps_per_frame = int(
+            self.get_parameter("gripper_steps_per_frame").value
+        )
+        self.gripper_settle_steps = int(
+            self.get_parameter("gripper_settle_steps").value
+        )
         self.settle_steps = int(self.get_parameter("settle_steps").value)
         self.cycle_pause_seconds = float(
             self.get_parameter("cycle_pause_seconds").value
@@ -161,6 +192,9 @@ class GraspCubeAction(Node):
         self.world_service_timeout_ms = int(
             self.get_parameter("world_service_timeout_ms").value
         )
+        self.turn_service_timeout_ms = int(
+            self.get_parameter("turn_service_timeout_ms").value
+        )
         self.step_retries = int(self.get_parameter("step_retries").value)
         self.stop_on_empty_grasp = bool(
             self.get_parameter("stop_on_empty_grasp").value
@@ -175,15 +209,28 @@ class GraspCubeAction(Node):
             raise GraspActionError("open_offset 和 close_offset 不能为负数")
         if self.run_count < 1:
             raise GraspActionError("run_count 必须大于零")
-        if self.cube_size <= 0.0 or self.cube_mass <= 0.0:
-            raise GraspActionError("cube_size 和 cube_mass 必须大于零")
+        if min(
+            self.cube_length,
+            self.cube_width,
+            self.cube_height,
+            self.cube_mass,
+            self.cube_friction,
+        ) <= 0.0:
+            raise GraspActionError("柱体长、宽、高、质量和摩擦系数必须大于零")
         if re.fullmatch(r"[A-Za-z0-9_-]+", self.cube_name) is None:
             raise GraspActionError(
                 "cube_name 只能包含字母、数字、下划线和连字符"
             )
-        if min(self.motion_frames, self.steps_per_frame, self.settle_steps) < 1:
+        if min(
+            self.motion_frames,
+            self.steps_per_frame,
+            self.gripper_motion_frames,
+            self.gripper_steps_per_frame,
+            self.gripper_settle_steps,
+            self.settle_steps,
+        ) < 1:
             raise GraspActionError(
-                "motion_frames、steps_per_frame 和 settle_steps 必须大于零"
+                "动作、夹爪和停稳步数参数必须大于零"
             )
         fractions = (
             self.arm_initial_fraction,
@@ -204,9 +251,17 @@ class GraspCubeAction(Node):
             )
         if self.turn_steps < 1 or self.turn_chunk_steps < 1:
             raise GraspActionError("turn_steps 和 turn_chunk_steps 必须大于零")
-        if self.world_service_timeout_ms < 1000 or self.step_retries < 1:
+        if (
+            min(
+                self.world_service_timeout_ms,
+                self.turn_service_timeout_ms,
+            )
+            < 1000
+            or self.step_retries < 1
+        ):
             raise GraspActionError(
-                "world_service_timeout_ms 至少为 1000，step_retries 至少为 1"
+                "world/turn service timeout 至少为 1000，"
+                "step_retries 至少为 1"
             )
 
         self.latest_joint_state = None
@@ -266,8 +321,13 @@ class GraspCubeAction(Node):
                     states[fields[0]] = state
         return states
 
-    def _step(self, count, allow_retry=True):
+    def _step(self, count, allow_retry=True, timeout_ms=None):
         attempts = self.step_retries if allow_retry else 1
+        request_timeout_ms = (
+            self.world_service_timeout_ms
+            if timeout_ms is None
+            else int(timeout_ms)
+        )
         command = [
             "ign",
             "service",
@@ -278,7 +338,7 @@ class GraspCubeAction(Node):
             "--reptype",
             "ignition.msgs.Boolean",
             "--timeout",
-            str(self.world_service_timeout_ms),
+            str(request_timeout_ms),
             "--req",
             f"multi_step: {int(count)}",
         ]
@@ -288,7 +348,7 @@ class GraspCubeAction(Node):
                 result = self._run(
                     command,
                     check=False,
-                    timeout=self.world_service_timeout_ms / 1000.0 + 5.0,
+                    timeout=request_timeout_ms / 1000.0 + 5.0,
                     log=False,
                 )
                 last_output = result.stdout.strip()
@@ -550,16 +610,34 @@ class GraspCubeAction(Node):
         except Exception as error:
             self.get_logger().warning(f"安全停止未完全执行：{error}")
 
-    def _move(self, label, start, target):
+    def _move_interpolated(self, label, start, target, frames, steps_per_frame):
         self.get_logger().info(label)
-        for frame in range(1, self.motion_frames + 1):
-            ratio = frame / self.motion_frames
+        for frame in range(1, frames + 1):
+            ratio = frame / frames
             command = [
                 begin + (end - begin) * ratio
                 for begin, end in zip(start, target)
             ]
             self._publish(command)
-            self._step(self.steps_per_frame)
+            self._step(steps_per_frame)
+
+    def _move(self, label, start, target):
+        self._move_interpolated(
+            label,
+            start,
+            target,
+            self.motion_frames,
+            self.steps_per_frame,
+        )
+
+    def _move_gripper(self, label, start, target):
+        self._move_interpolated(
+            label,
+            start,
+            target,
+            self.gripper_motion_frames,
+            self.gripper_steps_per_frame,
+        )
 
     def _publish_status(self, text):
         message = String()
@@ -569,7 +647,18 @@ class GraspCubeAction(Node):
         rclpy.spin_once(self, timeout_sec=0.05)
 
     def _cube_sdf(self):
-        inertia = self.cube_mass * self.cube_size * self.cube_size / 6.0
+        ixx = self.cube_mass * (
+            self.cube_width**2 + self.cube_height**2
+        ) / 12.0
+        iyy = self.cube_mass * (
+            self.cube_length**2 + self.cube_height**2
+        ) / 12.0
+        izz = self.cube_mass * (
+            self.cube_length**2 + self.cube_width**2
+        ) / 12.0
+        dimensions = (
+            f"{self.cube_length} {self.cube_width} {self.cube_height}"
+        )
         return f"""<?xml version="1.0"?>
 <sdf version="1.7">
   <model name="{self.cube_name}">
@@ -578,21 +667,21 @@ class GraspCubeAction(Node):
       <inertial>
         <mass>{self.cube_mass:.9f}</mass>
         <inertia>
-          <ixx>{inertia:.12f}</ixx>
-          <iyy>{inertia:.12f}</iyy>
-          <izz>{inertia:.12f}</izz>
+          <ixx>{ixx:.12f}</ixx>
+          <iyy>{iyy:.12f}</iyy>
+          <izz>{izz:.12f}</izz>
           <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
         </inertia>
       </inertial>
       <collision name="cube_collision">
-        <geometry><box><size>{self.cube_size} {self.cube_size} {self.cube_size}</size></box></geometry>
+        <geometry><box><size>{dimensions}</size></box></geometry>
         <surface>
-          <friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction>
+          <friction><ode><mu>{self.cube_friction}</mu><mu2>{self.cube_friction}</mu2></ode></friction>
           <contact><ode><kp>100000</kp><kd>10</kd></ode></contact>
         </surface>
       </collision>
       <visual name="cube_visual">
-        <geometry><box><size>{self.cube_size} {self.cube_size} {self.cube_size}</size></box></geometry>
+        <geometry><box><size>{dimensions}</size></box></geometry>
         <material>
           <ambient>0.85 0.12 0.05 1</ambient>
           <diffuse>0.95 0.18 0.06 1</diffuse>
@@ -634,8 +723,10 @@ class GraspCubeAction(Node):
             Path(sdf_path).unlink(missing_ok=True)
 
         self._publish_status(
-            f"TEST CUBE CREATED | name={self.cube_name} | "
-            f"size={self.cube_size:.3f} m | "
+            f"TEST BLOCK CREATED | name={self.cube_name} | "
+            f"size=({self.cube_length:.3f}, {self.cube_width:.3f}, "
+            f"{self.cube_height:.3f}) m | "
+            f"friction={self.cube_friction:.2f} | "
             f"position=({self.cube_x:.3f}, {self.cube_y:.3f}, "
             f"{self.cube_z:.3f})"
         )
@@ -645,9 +736,9 @@ class GraspCubeAction(Node):
             f"RUN {attempt}/{self.run_count} | STEP {number}: {label}"
         )
 
-    def _settle(self, held_positions):
+    def _settle(self, held_positions, steps=None):
         self._publish(held_positions, repeat=5)
-        self._step(self.settle_steps)
+        self._step(self.settle_steps if steps is None else int(steps))
 
     def _arm_pose(self, initial, fraction):
         index = {name: i for i, name in enumerate(POSITION_JOINTS)}
@@ -682,7 +773,7 @@ class GraspCubeAction(Node):
         return result
 
     def _is_fully_closed(self, closed_pose, index):
-        """可选的仿真空抓检测；默认关闭，避免接触模型造成误判。"""
+        """仿真空抓检测：两侧都到达闭合目标时判定没有夹到物体。"""
         rclpy.spin_once(self, timeout_sec=0.2)
         if self.latest_joint_state is None:
             return False
@@ -700,9 +791,11 @@ class GraspCubeAction(Node):
 
     def _safe_home_pose(self, initial, current, index):
         current_open = self._gripper_pose(current, initial, index, opened=True)
-        self._move("安全张开夹爪", current, current_open)
+        self._move_gripper("安全张开夹爪", current, current_open)
         home_open = self._gripper_pose(initial, initial, index, opened=True)
         self._move("安全回中机械臂", current_open, home_open)
+        self._settle(home_open)
+        self._publish_status("SAFE HOME COMPLETE: gripper open, arm initialized")
         return home_open
 
     def _rotate_chassis(self, held_positions):
@@ -718,17 +811,34 @@ class GraspCubeAction(Node):
             f"小车开始原地旋转：轮速 {self.wheel_speed:.2f} rad/s，"
             f"仿真步数 {self.turn_steps}"
         )
-        while remaining > 0:
-            chunk = min(remaining, self.turn_chunk_steps)
-            self._publish(held_positions)
-            self._publish_to(self.wheel_publisher, wheel_command)
-            # 转向步数直接决定角度；超时时不自动重试，避免一次请求其实
-            # 已执行却因回复丢失而重复转向。
-            self._step(chunk, allow_retry=False)
-            remaining -= chunk
-        self._publish_to(self.wheel_publisher, [0.0] * 4, repeat=10)
-        self._publish(held_positions, repeat=10)
-        self._step(100)
+        try:
+            while remaining > 0:
+                chunk = min(remaining, self.turn_chunk_steps)
+                self._publish(held_positions)
+                self._publish_to(self.wheel_publisher, wheel_command)
+                # 转向步数直接决定角度；超时时不自动重试，避免一次请求
+                # 已执行却因回复丢失而重复转向。
+                self._step(
+                    chunk,
+                    allow_retry=False,
+                    timeout_ms=self.turn_service_timeout_ms,
+                )
+                remaining -= chunk
+                completed = self.turn_steps - remaining
+                self.get_logger().info(
+                    f"转向进度：{completed}/{self.turn_steps} 仿真步"
+                )
+        finally:
+            # 无论转向成功、超时还是 Ctrl+C，都先写入零轮速。
+            self._publish_to(self.wheel_publisher, [0.0] * 4, repeat=10)
+            self._publish(held_positions, repeat=10)
+            try:
+                self._step(20)
+            except Exception as error:
+                self.get_logger().warning(
+                    f"转向结束后的零速确认未完成：{error}"
+                )
+        self._step(80)
         self.get_logger().info("小车旋转结束，车轮已停止")
 
     def _run_once(self, attempt, initial, current, index):
@@ -748,7 +858,7 @@ class GraspCubeAction(Node):
         initial_open = self._gripper_pose(
             initial_forward, initial, index, opened=True
         )
-        self._move("张开夹爪", initial_forward, initial_open)
+        self._move_gripper("张开夹爪", initial_forward, initial_open)
 
         self._report_step(attempt, 2, "CHASSIS SETTLE")
         self._settle(initial_open)
@@ -790,14 +900,14 @@ class GraspCubeAction(Node):
         grasp_closed = self._gripper_pose(
             grasp_open, initial, index, opened=False
         )
-        self._move("闭合夹爪", grasp_open, grasp_closed)
-        self._settle(grasp_closed)
+        self._move_gripper("缓慢闭合夹爪", grasp_open, grasp_closed)
+        self._settle(grasp_closed, self.gripper_settle_steps)
 
         self._report_step(attempt, 10, "CHECK GRIPPER CLOSED ANGLE / STATUS")
         if self.stop_on_empty_grasp and self._is_fully_closed(
             grasp_closed, index
         ):
-            self._publish_status("抓取失败：夹爪完全闭合，停止五次循环")
+            self._publish_status("抓取失败：夹爪完全闭合，停止搬运循环")
             return False, self._safe_home_pose(
                 initial, grasp_closed, index
             )
@@ -815,6 +925,13 @@ class GraspCubeAction(Node):
 
         self._report_step(attempt, 12, "CHECK REAL GRASP")
         self._settle(test_lift_closed)
+        if self.stop_on_empty_grasp and self._is_fully_closed(
+            test_lift_closed, index
+        ):
+            self._publish_status("抓取失败：试抬后夹爪完全闭合，执行安全回位")
+            return False, self._safe_home_pose(
+                initial, test_lift_closed, index
+            )
 
         self._report_step(attempt, 13, "MAIN LIFT")
         lifted_closed = list(test_lift_closed)
@@ -839,7 +956,7 @@ class GraspCubeAction(Node):
         released = self._gripper_pose(
             grasp_closed, initial, index, opened=True
         )
-        self._move("释放物品", grasp_closed, released)
+        self._move_gripper("释放物品", grasp_closed, released)
 
         self._report_step(attempt, 19, "LIFT ARM AWAY")
         lifted_open = list(released)
@@ -858,6 +975,19 @@ class GraspCubeAction(Node):
         if shutil.which("ros2") is None or shutil.which("ign") is None:
             raise GraspActionError("找不到 ros2 或 ign，请先 source ROS 2 环境")
 
+        self.get_logger().info(
+            f"ACTION VERSION: {ACTION_VERSION} | "
+            f"motion={self.motion_frames}x{self.steps_per_frame} steps | "
+            f"gripper={self.gripper_motion_frames}x"
+            f"{self.gripper_steps_per_frame} steps | "
+            f"open={self.open_offset:.2f} rad | "
+            f"lowest={self.arm_extend_delta:.2f} rad | "
+            f"block={self.cube_length:.2f}x{self.cube_width:.2f}x"
+            f"{self.cube_height:.2f} m/{self.cube_mass:.2f} kg/"
+            f"mu={self.cube_friction:.1f} | "
+            f"turn={self.turn_steps} steps in chunks of "
+            f"{self.turn_chunk_steps}"
+        )
         self.get_logger().info("准备 1/2：激活只读关节状态")
         self._ensure_broadcaster()
         initial = self._wait_for_joint_state()
@@ -871,7 +1001,7 @@ class GraspCubeAction(Node):
         startup_open = self._gripper_pose(
             initial, initial, index, opened=True
         )
-        self._move("开始所有步骤前先张开夹爪", initial, startup_open)
+        self._move_gripper("开始所有步骤前先张开夹爪", initial, startup_open)
         self._settle(startup_open)
 
         if self.spawn_test_cube:
@@ -937,5 +1067,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-
-
