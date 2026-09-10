@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import subprocess
 import time
 
 # 注意: 使用 pip 安装的官方 SDK (pip3 install --user ./RoboMaster-SDK)。
@@ -26,7 +27,12 @@ FINAL_LIFT_MM = 70
 
 OPEN_POWER = 35
 GRIP_POWER = 60
-GRIP_STATUS_TIMEOUT = 6.0
+# 状态稳定窗口: 同一个状态被 5Hz 推送连续保持这么长时间, 才算"停住"。
+# 空夹闭合时爪子会先经过 normal(中途) 再到 closed(机械限位),
+# 稳定窗口必须大于"路过 normal"的时长, 否则空夹会被误判成夹到物体。
+GRIP_STABLE_TIME = 2.5
+# 闭合后等待状态稳定的最长总时间; 超时按失败处理。
+GRIP_STATUS_TIMEOUT = 8.0
 
 RIGHT_TURN_DEG = -180
 TURN_SPEED_DPS = 20
@@ -51,11 +57,26 @@ FINAL_LIFT_TIME = 1.5
 
 RETRY_PAUSE_TIME = 2.0
 
-gripper_status = {"value": "unknown"}
+gripper_status = {"value": "unknown", "ts": 0.0}
 
 # ROS2 包装节点(real_pick_place_ros2_node.py)会注入发布函数,
 # 使 ERROR/SUCCESS 状态同步显示到 /real_pick_place/status 话题。
 status_hook = None
+
+
+def current_wifi_ssid():
+    """返回板子当前连接的 WiFi SSID; 读不到返回 ""。"""
+    try:
+        out = subprocess.run(
+            ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        for line in out.splitlines():
+            if line.startswith("yes:"):
+                return line.split(":", 1)[1]
+    except Exception:
+        return "?"
+    return ""
 
 
 def report_status(text):
@@ -79,6 +100,7 @@ def on_gripper_status(status):
     if isinstance(status, (list, tuple)) and status:
         status = status[0]
     gripper_status["value"] = status
+    gripper_status["ts"] = time.time()
 
 
 def is_fully_closed(status):
@@ -104,20 +126,32 @@ def is_fully_closed(status):
     return False
 
 
-def wait_gripper_status(expect, timeout=GRIP_STATUS_TIMEOUT, poll=0.2):
-    """轮询等待夹爪状态进入期望集合, 超时返回最后读到的值。
+def wait_gripper_status(stable_time=GRIP_STABLE_TIME,
+                        timeout=GRIP_STATUS_TIMEOUT, poll=0.2):
+    """等待夹爪状态稳定, 返回稳定后的状态值。
 
-    5 Hz 订阅回调在后台更新 gripper_status["value"], 这里每 poll 秒读一次。
-    空夹闭合时爪子会走到机械限位 -> closed; 夹到物体时停在中间 -> normal。
+    5 Hz 订阅回调在后台更新 gripper_status["value"] 和 ["ts"]。
+    空夹闭合时爪子会先经过 normal(中途位置) 再到 closed(机械限位),
+    夹到物体时则停在 normal。因此不能见到 normal 就判定成功,
+    必须等同一个状态被连续推送 stable_time 秒(稳定窗口), 区分
+    "路过 normal"和"停在 normal"。
+
+    返回:
+        "closed"  空夹走到底(未探测到物体)
+        "normal"  夹住了物体, 爪子停在中间
+        "opened"/"unknown"/其他 -> 调用方按失败处理
+    超时(或订阅从未推送)返回最后读到的值。
     """
     deadline = time.time() + timeout
-    value = gripper_status["value"]
-    while time.time() < deadline:
-        value = gripper_status["value"]
-        if str(value).strip().lower() in expect:
-            return value
+    while True:
+        now = time.time()
+        ts = gripper_status.get("ts", 0.0)
+        # ts>0 说明至少收到过一次推送; 同一状态持续 stable_time 秒即稳定
+        if ts > 0 and now - ts >= stable_time:
+            return gripper_status["value"]
+        if now >= deadline:
+            return gripper_status["value"]
         time.sleep(poll)
-    return value
 
 
 def move_arm_delta(arm, dx_mm, dy_mm, label, wait_time):
@@ -222,17 +256,16 @@ def run_once(attempt, ep, arm, gripper, chassis):
 
     step(attempt, 9, "CLOSE GRIPPER")
     gripper_status["value"] = "unknown"
+    gripper_status["ts"] = 0.0
     gripper.close(power=GRIP_POWER)
 
     # 注意: 不能像之前那样固定延时后 pause() —— 空夹时爪子还没走到
     # 机械限位就被冻结在中间位置, 状态会误报 normal (误判为夹到物体)。
-    # 正确做法: 让爪子持续闭合直到状态稳定, 再判定:
+    # 正确做法: 让爪子持续闭合, 等状态稳定(见 wait_gripper_status)再判定:
     #   closed = 空夹走到底(未探测到物体)
     #   normal = 夹住了物体, 爪子停在中间
     step(attempt, 10, "CHECK GRIPPER CLOSED ANGLE / STATUS")
-    current_status = wait_gripper_status(
-        {"closed", "normal"}, timeout=GRIP_STATUS_TIMEOUT
-    )
+    current_status = wait_gripper_status()
     print(f"gripper status after close: {current_status}")
 
     # 关键判定: 夹爪完全闭合 => 未探测到物体 => 报错并退出循环
@@ -297,8 +330,32 @@ def run_once(attempt, ep, arm, gripper, chassis):
 
 def main():
     print("Connecting RoboMaster...")
+
+    # 预检: 板子必须已连机器人热点, 否则 SDK 静默失败,
+    # 最后 close() 时还会炸出 NoneType.is_alive 的晦涩报错。
+    ssid = current_wifi_ssid()
+    print(f"current wifi: {ssid!r}")
+    if not ssid.startswith("RMEP"):
+        report_status(
+            f"ERROR: 板子当前不在机器人热点上({ssid!r}), 中止。"
+            f"先开机机器人, 然后执行: nmcli connection up RMEP-21bbc5"
+        )
+        return 0, RUN_COUNT
+
     ep = robot.Robot()
-    ep.initialize(conn_type="ap")
+    try:
+        initialized = ep.initialize(conn_type="ap")
+    except Exception as e:
+        # 初始化失败时不能调 ep.close() (SDK 的 stop() 会对未创建的
+        # 连接线程调 is_alive, 报 NoneType 错误), 直接返回。
+        report_status(f"ERROR: SDK 初始化异常, 中止: {e}")
+        return 0, RUN_COUNT
+
+    if not initialized:
+        # initialize 可能不抛异常而是返回 False (连不上机器人)。
+        # 同样不能调 ep.close(), 直接返回。
+        report_status("ERROR: 连不上机器人, 检查机器人是否开机, 中止")
+        return 0, RUN_COUNT
 
     arm = ep.robotic_arm
     gripper = ep.gripper

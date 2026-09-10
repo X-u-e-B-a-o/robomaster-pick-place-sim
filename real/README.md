@@ -64,14 +64,28 @@ Grasp judgment (DJI SDK gripper status, sub_status at 5 Hz):
 - `opened`  = gripper fully open
 - `normal`  = middle position -> object held -> grasp SUCCEEDED
 
-Judgment procedure: after `gripper.close()`, the script polls the status for
-up to 6 s and waits for it to settle at `closed` or `normal`.
+Judgment procedure: after `gripper.close()`, the script waits for the status
+to STABILIZE — the same status pushed continuously for `GRIP_STABLE_TIME`
+(2.5 s) — with a total budget of `GRIP_STATUS_TIMEOUT` (8 s). The stability
+window matters because an EMPTY close passes THROUGH `normal` mid-travel
+before reaching the limit; only a status that PERSISTS counts as the outcome.
 
 IMPORTANT: do NOT call `gripper.pause()` right after close. Pausing mid-close
 freezes the jaws at a middle position, so an EMPTY close is misread as
 `normal` (false success). The close command stays active and the firmware
-stops the jaws at the mechanical limit by itself. Only an explicit `normal`
-counts as success; `opened` / unreadable / timeout all count as failure.
+stops the jaws at the mechanical limit by itself. Only a stable `normal`
+counts as success; `closed` / `opened` / unreadable / timeout all count as
+failure.
+
+Also, the script pre-checks that the board's WiFi is on the robot AP
+(`nmcli`) and that `robot.initialize()` returns success before doing anything,
+so a wrong-network run aborts with a clear message instead of the SDK's
+cryptic `NoneType.is_alive` teardown error.
+
+`real/gripper_status_probe.py` prints the live status transitions during an
+empty close — run it once on the real robot to confirm the gripper reaches
+`closed`, and to measure how long mid-travel `normal` lasts (if it ever
+exceeds `GRIP_STABLE_TIME`, raise that constant).
 
 If grasp succeeds:
 - robot shows SUCCESS: armor LEDs solid green + success sound
