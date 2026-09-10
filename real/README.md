@@ -10,6 +10,21 @@ This folder contains the real RoboMaster EP/Core pick-place experiment files.
 
 ## Before Running
 
+0. One-time setup: `libmedia_codec` stub (aarch64 has no `.so`; the SDK's
+   `media.py` instantiates the decoders, so the stub MUST provide both
+   classes — a comment-only file fails with `no attribute H264Decoder`):
+
+    mkdir -p ~/.local/lib/python3.10/site-packages
+    cat > ~/.local/lib/python3.10/site-packages/libmedia_codec.py << 'EOF'
+    class H264Decoder:
+        def __init__(self, *a, **k): pass
+        def decode(self, d): return []
+
+    class OpusDecoder:
+        def __init__(self, *a, **k): pass
+        def decode(self, d): return []
+    EOF
+
 1. Power on RoboMaster.
 2. Manually connect Jetson to RoboMaster Wi-Fi.
 3. Check connection:
