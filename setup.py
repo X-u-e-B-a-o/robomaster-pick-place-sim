@@ -20,6 +20,8 @@ setup(
             'pick_place_moveit = robomaster_pick_place_sim.pick_place_moveit:main',
             'calibrate_pose = robomaster_pick_place_sim.calibrate_pose:main',
             'test_joints = robomaster_pick_place_sim.test_joints:main',
+            # 真机节点 (Jetson 板子上): ros2 run robomaster_pick_place_sim real_pick_place
+            'real_pick_place = real.real_pick_place_ros2_node:main',
         ],
     },
     install_requires=['setuptools'],

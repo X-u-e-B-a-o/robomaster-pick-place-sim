@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import os
 import subprocess
+import sys
 import time
 
 # 注意: 使用 pip 安装的官方 SDK (pip3 install --user ./RoboMaster-SDK)。
@@ -66,6 +68,43 @@ gripper_status = {"value": "unknown", "ts": 0.0}
 # ROS2 包装节点(real_pick_place_ros2_node.py)会注入发布函数,
 # 使 ERROR/SUCCESS 状态同步显示到 /real_pick_place/status 话题。
 status_hook = None
+
+# 每次运行的完整输出(测试结果 + 出错日志)自动保存到桌面, 实验报告直接引用。
+LOG_DIR = os.path.expanduser("~/Desktop")
+LOG_LINES = []
+
+
+class _Tee:
+    """把 stdout 的输出同时收集到 LOG_LINES, 供结束时保存到桌面。"""
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text):
+        self.stream.write(text)
+        if text.strip():
+            LOG_LINES.append(text.rstrip("\n"))
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        # isatty/encoding/fileno 等属性委托给原流, 避免下游代码报错
+        return getattr(self.stream, name)
+
+
+def save_run_log():
+    """把本次运行的完整输出保存到桌面 (无论成败, main 的 finally 里调用)。"""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(LOG_DIR, f"pick_place_run_{stamp}.txt")
+        with open(path, "w") as f:
+            f.write("\n".join(LOG_LINES) + "\n")
+        print(f"运行日志已保存: {path}")
+    except Exception as e:
+        print(f"保存运行日志失败: {e}")
 
 
 def current_wifi_ssid():
@@ -327,6 +366,21 @@ def run_once(attempt, ep, arm, gripper, chassis):
 
 
 def main():
+    """入口: 收集本次运行的完整输出, 结束时保存运行日志到桌面。"""
+    # stdout/stderr 都走 _Tee, 未捕获异常的回溯也会进日志文件
+    stdout_orig, stderr_orig = sys.stdout, sys.stderr
+    sys.stdout = _Tee(stdout_orig)
+    sys.stderr = _Tee(stderr_orig)
+    try:
+        return _run()
+    finally:
+        # 无论成功、报错还是异常退出, 都保存本次运行日志
+        sys.stdout = stdout_orig
+        sys.stderr = stderr_orig
+        save_run_log()
+
+
+def _run():
     print("Connecting RoboMaster...")
 
     # 预检: 板子必须已连机器人热点, 否则 SDK 静默失败,
@@ -389,6 +443,13 @@ def main():
         print(f"success: {success_count}")
         print(f"failed: {fail_count}")
         print(f"planned runs: {RUN_COUNT}")
+
+        # 验收判定 (与仿真侧一致: 成功率 >= 80%, 即 5 次至少成功 4 次)
+        passed = success_count >= max(1, int(0.8 * RUN_COUNT))
+        report_status(
+            f"验收结果: {'通过' if passed else '未通过'} "
+            f"({success_count}/{RUN_COUNT})"
+        )
 
         # 最终判定: 失败保持红灯闪烁报错, 全部成功亮绿灯报成功
         if fail_count > 0:

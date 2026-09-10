@@ -43,9 +43,17 @@ Jetson is a mixed-version snapshot whose `client.py` references a nonexistent
 
 ## Run With ROS2
 
+真机节点已打包进 ROS2 包 (entry point `real_pick_place`)。
+改动代码后先重新构建 (symlink 安装, 源码改动即时生效):
+
     cd ~/colcon_ws
     source /opt/ros/humble/setup.bash
-    source install/robomaster_pick_place_sim/share/robomaster_pick_place_sim/package.bash
+    colcon build --symlink-install --packages-select robomaster_pick_place_sim
+    source install/setup.bash
+
+然后二选一:
+
+    ros2 run robomaster_pick_place_sim real_pick_place
     ros2 launch robomaster_pick_place_sim real_pick_place.launch.py
 
 ## Watch ROS2 Status
@@ -54,6 +62,13 @@ Open another terminal:
 
     source /opt/ros/humble/setup.bash
     ros2 topic echo /real_pick_place/status
+
+## 运行日志 (桌面)
+
+每次运行主脚本, 完整输出 (每一步动作、判定结果、出错回溯) 都会自动
+保存到桌面 `~/Desktop/pick_place_run_<时间戳>.txt`, 无论成败都会保存,
+实验报告直接引用该文件。功率扫描的日志同理保存为
+`~/Desktop/gripper_sweep_<标记>_<时间戳>.txt`。
 
 ## Behavior
 
