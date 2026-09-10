@@ -42,6 +42,9 @@ def generate_launch_description():
                           'ompl': ompl}
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    # 轨迹执行时长上限倍率 (MoveIt 默认 2.0): 真机 SDK 逐点执行比规划时长
+    # 慢得多, 需要调大, 否则 trajectory_execution 会因超时提前中断
+    exec_scaling = LaunchConfiguration('execution_duration_scaling', default='2.0')
 
     move_group_params = [
         robot_description,
@@ -60,6 +63,9 @@ def generate_launch_description():
             'publish_geometry_updates': True,
             'publish_state_updates': True,
             'publish_transforms_updates': True,
+            'trajectory_execution': {
+                'allowed_execution_duration_scaling': exec_scaling,
+            },
         },
     ]
 

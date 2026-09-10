@@ -1,0 +1,25 @@
+# EP 真机驱动参数 (ep_arm_driver 启动时加载, dry_run 由 launch 参数覆盖)
+# anchor*_real / home_real 为真机空间坐标 [mm], 由 calibrate_real 工具标定:
+#   ros2 run robomaster_ep_driver calibrate_real
+ep_arm_driver:
+  ros__parameters:
+    conn_type: ap            # ap=热点直连 sta=组网 rndis=USB
+    robot_sn: ''             # sta 组网模式才需要
+    dry_run: false           # true=不控真机, 仅打印映射路径 (launch 参数覆盖)
+    joint_state_rate: 20.0   # /joint_states 发布频率 [Hz]
+    waypoint_min_dist_mm: 4.0  # 轨迹抽稀阈值: 相邻真机目标点最小距离 [mm]
+    moveto_timeout_s: 5.0    # 单个 waypoint 等待完成超时 [s]
+    gripper_close_threshold: 0.02  # 开度指令 <= 该值 -> 夹紧 [m]
+    gripper_open_power: 60   # 张开出力 [1,100]
+    gripper_close_power: 40  # 夹紧出力 [1,100] (目标物 <=100g)
+
+    # 标定锚点: A 取物点 / B 放置点在仿真空间与真机空间的对应,
+    # 映射系数由这两组锚点计算 (x_r=kx*x_s+bx, y_r=kz*z_s+bz)
+    anchor1_sim: [0.60, 0.32]
+    anchor1_real: [60, 40]
+    anchor2_sim: [0.64, 0.35]
+    anchor2_real: [170, 60]
+    home_real: [32, 114]     # 真机回零点 [mm] (仅日志/校验用)
+
+    arm_x_range: [0.0, 220.0]  # 官方规格: 水平 0~0.22 m
+    arm_y_range: [0.0, 150.0]  # 官方规格: 垂直 0~0.15 m

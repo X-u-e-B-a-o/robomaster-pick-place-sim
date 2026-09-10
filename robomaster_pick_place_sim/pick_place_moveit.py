@@ -71,6 +71,9 @@ DEFAULT_PARAMS = {
     'table': {'center': [0.78, 0.0, 0.15], 'size': [0.80, 0.70, 0.30]},
     'log_dir': 'results',
     'abort_on_error': False,
+    'home_joints': None,       # 回零角 [yaw, lift, wrist]; None=用 SRDF home
+                               # (真机覆写: SRDF 回零角映射出真机工作范围)
+    'grip_settle_s': 1.5,      # 夹爪指令后的稳定等待 [s] (真机夹紧较慢可调大)
 }
 
 EE_LINK = 'gripper_base_link'
@@ -312,7 +315,13 @@ class PickPlaceNode(Node):
         return c
 
     def _home_joints(self):
-        """从 SRDF 读取 home 位姿 [yaw, lift, wrist]."""
+        """回零位姿 [yaw, lift, wrist].
+
+        优先使用参数 home_joints (真机: 仿真 SRDF 回零角经标定映射后
+        超出真机工作范围, 需覆写为真机回零角); 未配置时从 SRDF 读取.
+        """
+        if self.p.get('home_joints'):
+            return [float(v) for v in self.p['home_joints']]
         srdf = os.path.join(
             get_package_share_directory('robomaster_ep_moveit_config'),
             'config', 'robomaster_ep.srdf')
@@ -457,7 +466,7 @@ class PickPlaceNode(Node):
 
     def grip(self, value, label):
         self.grip_pub.publish(Float64MultiArray(data=[float(value), float(value)]))
-        time.sleep(1.5)
+        time.sleep(float(self.p['grip_settle_s']))
         self._record(label, True)
         self.log(f'{label}: 夹爪指令 {value:.3f} m')
 
