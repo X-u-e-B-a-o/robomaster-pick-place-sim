@@ -19,7 +19,7 @@ COARSE_FORWARD_MM = 60
 COARSE_DOWN_MM = -240
 
 FINAL_FORWARD_MM = 6
-FINAL_DOWN_MM = -240
+FINAL_DOWN_MM = -24
 
 TEST_LIFT_MM = 25
 MAIN_LIFT_MM = 60
@@ -31,27 +31,26 @@ GRIP_POWER = 60
 GRIP_CLOSE_PULSE_TIME = 1.5
 GRIP_PAUSE_TIME = 1.0
 
-RIGHT_TURN_DEG = -120
-TURN_BACK_DEG = 90
+RIGHT_TURN_DEG = -180
 TURN_SPEED_DPS = 20
 
 OPEN_TIME = 1.5
 CHASSIS_SETTLE_TIME = 1.2
-FORWARD_MOVE_TIME = 6.0
+FORWARD_MOVE_TIME = 1.0
 FORWARD_SETTLE_TIME = 1.0
-COARSE_MOVE_TIME = 9.0
+COARSE_MOVE_TIME = 1.0
 COARSE_SETTLE_TIME = 1.0
-FINAL_MOVE_TIME = 5.0
+FINAL_MOVE_TIME = 1.5
 GRASP_HEIGHT_PAUSE_TIME = 1.2
-TEST_LIFT_TIME = 5.0
+TEST_LIFT_TIME = 1.5
 TEST_SETTLE_TIME = 1.0
-MAIN_LIFT_TIME = 7.0
+MAIN_LIFT_TIME = 1.5
 BEFORE_TURN_TIME = 1.5
 AFTER_TURN_TIME = 1.5
-LOWER_TIME = 7.0
+LOWER_TIME = 1.5
 GROUND_PAUSE_TIME = 1.2
-RELEASE_TIME = 2.5
-FINAL_LIFT_TIME = 6.0
+RELEASE_TIME = 1.5
+FINAL_LIFT_TIME = 1.5
 
 def step(label, sec=0.0):
     print("\n========================================")
@@ -66,6 +65,8 @@ def move_arm_delta(arm, dx_mm, dy_mm, label, wait_time):
     time.sleep(wait_time)
 
 def main():
+    completed = False
+
     print("Connecting RoboMaster...")
     ep = robot.Robot()
     ep.initialize(conn_type="ap")
@@ -129,11 +130,11 @@ def main():
         step("STEP 14: SETTLE BEFORE TURN")
         time.sleep(BEFORE_TURN_TIME)
 
-        step("STEP 15: RIGHT TURN 90 DEG")
+        step("STEP 15: RIGHT TURN TO PLACE AREA")
         chassis.move(x=0, y=0, z=RIGHT_TURN_DEG, z_speed=TURN_SPEED_DPS).wait_for_completed()
         time.sleep(AFTER_TURN_TIME)
 
-        step("STEP 16: LOWER CUBE")
+        step("STEP 16: LOWER CUBE AT B POINT")
         move_arm_delta(arm, 0, RELEASE_DOWN_MM, "lower cube", LOWER_TIME)
 
         step("STEP 17: GROUND SETTLE")
@@ -146,23 +147,24 @@ def main():
         step("STEP 19: LIFT ARM AWAY")
         move_arm_delta(arm, 0, FINAL_LIFT_MM, "lift away", FINAL_LIFT_TIME)
 
-        step("STEP 20: TURN CHASSIS BACK")
-        chassis.move(x=0, y=0, z=TURN_BACK_DEG, z_speed=TURN_SPEED_DPS).wait_for_completed()
-        time.sleep(2)
-
-        step("STEP 21: DONE")
-        gripper.open(power=OPEN_POWER)
-        print("Pick-place sequence finished.")
+        step("STEP 20: DONE - KEEP FINAL POSE")
+        print("Pick-place sequence finished. Robot keeps final pose after B point.")
+        completed = True
 
     finally:
-        print("Safe cleanup: open gripper and recenter arm")
-        try:
-            gripper.open(power=OPEN_POWER)
-            time.sleep(1)
-            arm.recenter().wait_for_completed()
-        except Exception as e:
-            print("Cleanup warning:", e)
-        ep.close()
+        if completed:
+            print("Closing connection without returning home.")
+            ep.close()
+        else:
+            print("Interrupted or failed. Safe cleanup: open gripper and recenter arm.")
+            try:
+                gripper.open(power=OPEN_POWER)
+                time.sleep(1)
+                arm.recenter().wait_for_completed()
+            except Exception as e:
+                print("Cleanup warning:", e)
+            ep.close()
 
 if __name__ == "__main__":
     main()
+
