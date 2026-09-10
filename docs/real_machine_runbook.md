@@ -18,26 +18,33 @@
 ```bash
 # 2.1 EP 开机, 热点直连 (conn_type='ap'), Jetson 加入 EP WiFi
 # 2.2 部署代码 (本机仓库 robomaster-pick-place-sim, 分支 real-ep-arm)
-rsync -av --delete --exclude 'results*' --exclude '.git' \
-  robomaster-pick-place-sim/ <user>@10.140.246.156:~/ep_ws/src/robomaster-pick-place-sim/
-ssh <user>@10.140.246.156
+rsync -av --delete --exclude 'results*' --exclude '.git' --exclude '__pycache__' \
+  robomaster-pick-place-sim/ nvidia@10.140.246.156:~/ep_ws/src/robomaster-pick-place-sim/
+ssh nvidia@10.140.246.156
+# 仓库根目录是 robomaster_pick_place_sim 包, 两个子包需符号链接到 src 顶层
+# (colcon 不发现嵌套包, 与 colcon_ws 既有布局一致)
+ln -sfn robomaster-pick-place-sim/robomaster_ep_driver ~/ep_ws/src/robomaster_ep_driver
+ln -sfn robomaster-pick-place-sim/robomaster_ep_moveit_config ~/ep_ws/src/robomaster_ep_moveit_config
 
 # 2.3 安装官方 SDK (PyPI wheel 仅 x86_64, aarch64 必须从源码装;
 #     依赖 numpy/opencv-python/netaddr/netifaces/myqr 由 pip 自动装)
-mkdir -p ~/ep_ws/src/third_party && cd ~/ep_ws/src/third_party
 git clone https://github.com/dji-sdk/RoboMaster-SDK.git
 pip3 install --user ./RoboMaster-SDK
 
 # 2.4 打 libmedia_codec 存根 (SDK media.py 在模块级 import 视频解码库,
-#     aarch64 无对应 .so; 本实验无视觉需求, 空模块即可满足导入)
-mkdir -p ~/ep_ws/stubs
+#     aarch64 无对应 .so; 本实验无视觉需求, 空模块即可满足导入).
+#     放到 site-packages 使任何 shell 下都生效:
 printf '# RoboMaster SDK libmedia_codec 存根: 本实验不使用视频功能\n' \
-  > ~/ep_ws/stubs/libmedia_codec.py
-echo 'export PYTHONPATH=$HOME/ep_ws/stubs:$PYTHONPATH' >> ~/.bashrc
-source ~/.bashrc
+  > ~/.local/lib/python3.10/site-packages/libmedia_codec.py
 
-# 2.5 构建
-cd ~/ep_ws && colcon build --symlink-install && source install/setup.bash
+# 2.5 构建 (依赖 MoveIt 等来自 ~/colcon_ws, 需先 source 其 install)
+source /opt/ros/humble/setup.bash
+source ~/colcon_ws/install/setup.bash
+cd ~/ep_ws && colcon build --symlink-install
+# 运行时的 source 顺序 (ep_ws 最后, 使本仓库的三个包覆盖 colcon_ws 同名包):
+#   source /opt/ros/humble/setup.bash
+#   source ~/colcon_ws/install/setup.bash
+#   source ~/ep_ws/install/setup.bash
 ```
 
 ## 3. 标定 (必须一次, 之后参数文件直接复用)

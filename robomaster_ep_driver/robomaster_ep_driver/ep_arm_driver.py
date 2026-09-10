@@ -402,8 +402,16 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # SIGTERM/SIGINT 时 rclpy 自身的信号处理可能已关闭 context,
+        # 重复 shutdown 会抛 RCLError, 退出阶段无需在意
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
