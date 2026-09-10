@@ -1,0 +1,27 @@
+# 真机定点抓取任务参数 (launch 时 params_file:=config/pick_place_params_real.yaml)
+# 与仿真共用同一任务节点 pick_place_moveit.py, 仅更换点位/速度/回零参数,
+# 满足实验要求 "真机复用仿真 ROS 2 接口, 只修改设备、通信和位置参数".
+#
+# 真机几何约束: EP 机械臂为 2 自由度平面臂 (无偏航轴), 故 A/B 两点布置在
+# 机械臂正前方同一条线上 (一前一后); 仿真空间中同样令 place_point.y = 0,
+# 基座 yaw 恒为 0. 点位对应标定锚点 (见 ep_driver_params.yaml):
+#   A 取物点 (0.60, 0.32) -> 真机 (60, 40) mm
+#   B 放置点 (0.64, 0.35) -> 真机 (170, 60) mm
+pick_place_node:
+  ros__parameters:
+    num_cycles: 5             # 验收: 连续 5 次抓取至少成功 4 次
+    gripper_open: 0.040       # 手指开度指令 [m]
+    gripper_closed: 0.006     # 夹紧开度指令 [m]
+    max_velocity_scale: 0.2   # 真机首跑低速 (0~1)
+    max_acceleration_scale: 0.2
+    pick_point: {x: 0.60, y: 0.0, z: 0.32}        # 取物点 A (正前方)
+    place_point: {x: 0.64, y: 0.0, z: 0.35}       # 放置点 B (A 正后方同线)
+    pre_pick_point: {x: 0.60, y: 0.0, z: 0.38}    # 预抓取点: 同 lift, 纯腕部接近
+    pre_place_point: {x: 0.62, y: 0.0, z: 0.38}   # 预放置点: 同 lift, 纯腕部撤离
+    home_joints: [0.0, -0.751, 0.385]   # 真机回零角 (仿真 SRDF 回零角映射
+                                        # 越界, 该组角映射到真机 (32,114)mm)
+    attach_object: true         # 夹紧后把物体 attach 到夹爪, 运输不掉落
+    object_size: 0.07           # 目标物体立方体边长 [m]
+    table: {center: [0.78, 0.0, 0.15], size: [0.80, 0.70, 0.30]}  # 规划碰撞场景
+    grip_settle_s: 2.5          # 夹爪夹紧/张开后的稳定等待 [s] (真机较慢)
+    log_dir: results_real       # 日志/轨迹/结果输出目录 (相对运行目录)
