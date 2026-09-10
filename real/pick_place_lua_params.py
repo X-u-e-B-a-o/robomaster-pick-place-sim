@@ -430,6 +430,13 @@ if __name__ == "__main__":
     # 可选: python3 real/pick_place_lua_params.py <grip_power>
     # 用于在真机上快速测试不同闭合功率 (不经过 ROS2 节点)
     if len(sys.argv) > 1:
-        GRIP_POWER = int(sys.argv[1])
+        try:
+            GRIP_POWER = int(sys.argv[1])
+        except ValueError:
+            print(f"ERROR: 无效的功率参数: {sys.argv[1]!r}, 应为数字。用法:")
+            print("  python3 real/pick_place_lua_params.py        # 默认功率")
+            print("  python3 real/pick_place_lua_params.py 30     # 指定功率 30")
+            print("  (功率扫描请用: python3 real/gripper_status_sweep.py empty)")
+            sys.exit(1)
         print(f"grip power overridden from command line: {GRIP_POWER}")
     main()
