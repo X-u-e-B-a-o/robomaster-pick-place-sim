@@ -20,11 +20,15 @@ def generate_launch_description():
     default_params = os.path.join(
         package_share, "config", "continuous_grasp.yaml"
     )
+    default_points = os.path.join(
+        package_share, "config", "task_points.yaml"
+    )
     static_launch = os.path.join(
         package_share, "launch", "static_model.launch.py"
     )
 
     params_file = LaunchConfiguration("params_file")
+    points_file = LaunchConfiguration("points_file")
     log_dir = LaunchConfiguration("log_dir")
     speed_scale = LaunchConfiguration("speed_scale")
     start_simulator = LaunchConfiguration("start_simulator")
@@ -34,6 +38,11 @@ def generate_launch_description():
             "params_file",
             default_value=default_params,
             description="ROS 2 parameter file for the five-run grasp task",
+        ),
+        DeclareLaunchArgument(
+            "points_file",
+            default_value=default_points,
+            description="Pick, five place points, and safe-height parameters",
         ),
         DeclareLaunchArgument(
             "log_dir",
@@ -81,6 +90,7 @@ def generate_launch_description():
                     name="grasp_cube_action",
                     parameters=[
                         params_file,
+                        points_file,
                         {
                             "log_dir": log_dir,
                             "speed_scale": ParameterValue(

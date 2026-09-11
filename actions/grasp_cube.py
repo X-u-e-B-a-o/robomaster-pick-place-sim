@@ -31,7 +31,7 @@ from std_msgs.msg import Float64MultiArray, String
 
 
 WORLD_CONTROL_SERVICE = "/world/pick_place/control"
-ACTION_VERSION = "2026-09-11-four-times-speed-v14"
+ACTION_VERSION = "2026-09-11-task-points-v15"
 BROADCASTER = "joint_state_broadcaster"
 HOLD_CONTROLLER = "robomaster_position_hold_controller"
 HOLD_TOPIC = f"/{HOLD_CONTROLLER}/commands"
@@ -76,6 +76,16 @@ VELOCITY_JOINTS = (
     "front_right_wheel_joint",
     "rear_left_wheel_joint",
     "rear_right_wheel_joint",
+)
+
+# 以世界坐标系 x 轴为初始取物方向。每次向右转约 30 度后，物体仍在
+# 距原点 0.35 m 的圆弧上；y 轴向左为正，因此右转后的 y 为负。
+DEFAULT_PLACE_POINTS = (
+    (0.303109, -0.175000, 0.061),
+    (0.175000, -0.303109, 0.061),
+    (0.000000, -0.350000, 0.061),
+    (-0.175000, -0.303109, 0.061),
+    (-0.303109, -0.175000, 0.061),
 )
 
 
@@ -146,6 +156,10 @@ class GraspCubeAction(Node):
         self.declare_parameter("cube_y", 0.0)
         # 12 cm 高柱体的中心位于 6 cm 处，另加 1 mm 离地余量。
         self.declare_parameter("cube_z", 0.061)
+        self.declare_parameter("turn_angle_degrees", -30.0)
+        for number, point in enumerate(DEFAULT_PLACE_POINTS, start=1):
+            self.declare_parameter(f"place_point_{number}", list(point))
+        self.declare_parameter("safe_height", 0.45)
         # 正式动作按仿真时间连续插值，不再为每一帧调用 Gazebo 单步服务。
         # 1.0 为原实测速度；默认 4.0，可在 1.0～5.0 之间调整。
         self.declare_parameter("speed_scale", 4.0)
@@ -192,6 +206,18 @@ class GraspCubeAction(Node):
         self.cube_x = float(self.get_parameter("cube_x").value)
         self.cube_y = float(self.get_parameter("cube_y").value)
         self.cube_z = float(self.get_parameter("cube_z").value)
+        self.turn_angle_degrees = float(
+            self.get_parameter("turn_angle_degrees").value
+        )
+        self.place_points = []
+        for number in range(1, len(DEFAULT_PLACE_POINTS) + 1):
+            point = list(self.get_parameter(f"place_point_{number}").value)
+            if len(point) != 3:
+                raise GraspActionError(
+                    f"place_point_{number} 必须包含 [x, y, z] 三个数值"
+                )
+            self.place_points.append(tuple(float(value) for value in point))
+        self.safe_height = float(self.get_parameter("safe_height").value)
         self.speed_scale = float(self.get_parameter("speed_scale").value)
         if not 1.0 <= self.speed_scale <= 5.0:
             raise GraspActionError("speed_scale 必须在 1.0～5.0 之间")
@@ -266,6 +292,10 @@ class GraspCubeAction(Node):
             self.cube_friction,
         ) <= 0.0:
             raise GraspActionError("柱体长、宽、高、质量和摩擦系数必须大于零")
+        if not 0.0 < abs(self.turn_angle_degrees) <= 180.0:
+            raise GraspActionError("turn_angle_degrees 必须在 -180～180 度内且不能为零")
+        if not 0.0 < self.safe_height < 0.5:
+            raise GraspActionError("safe_height 必须大于 0 且小于 0.5 m")
         if re.fullmatch(r"[A-Za-z0-9_-]+", self.cube_name) is None:
             raise GraspActionError(
                 "cube_name 只能包含字母、数字、下划线和连字符"
@@ -1118,6 +1148,14 @@ class GraspCubeAction(Node):
         self._rotate_chassis(lifted_closed)
 
         self._report_step(attempt, 16, "LOWER CUBE AT B POINT")
+        configured_place = self.place_points[
+            (attempt - 1) % len(self.place_points)
+        ]
+        self.get_logger().info(
+            f"第 {attempt} 轮配置放置点（world）："
+            f"({configured_place[0]:.6f}, {configured_place[1]:.6f}, "
+            f"{configured_place[2]:.3f})"
+        )
         self._move("下降到放置位", lifted_closed, grasp_closed)
 
         self._report_step(attempt, 17, "GROUND SETTLE")
@@ -1158,6 +1196,15 @@ class GraspCubeAction(Node):
             f"{self.cube_height:.2f} m/{self.cube_mass:.2f} kg/"
             f"mu={self.cube_friction:.1f} | "
             f"turn={self.turn_steps * self.physics_step_seconds / self.speed_scale:.3f} s"
+        )
+        places = "; ".join(
+            f"P{number}=({point[0]:.6f},{point[1]:.6f},{point[2]:.3f})"
+            for number, point in enumerate(self.place_points, start=1)
+        )
+        self.get_logger().info(
+            f"空间配置 | PICK=({self.cube_x:.3f},{self.cube_y:.3f},"
+            f"{self.cube_z:.3f}) | TURN={self.turn_angle_degrees:.1f} deg | "
+            f"SAFE_HEIGHT={self.safe_height:.3f} m | {places}"
         )
         self.get_logger().info("准备 1/2：激活只读关节状态")
         self._ensure_broadcaster()
