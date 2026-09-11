@@ -95,11 +95,14 @@ class _Tee:
 
 
 def save_run_log():
-    """把本次运行的完整输出保存到桌面 (无论成败, main 的 finally 里调用)。"""
+    """把本次运行的完整输出保存到桌面 (无论成败, main 的 finally 里调用)。
+
+    文件名: test_<时间戳>.txt, 如 test_20260911_213045.txt (拍视频验收用)。
+    """
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(LOG_DIR, f"pick_place_run_{stamp}.txt")
+        path = os.path.join(LOG_DIR, f"test_{stamp}.txt")
         with open(path, "w") as f:
             f.write("\n".join(LOG_LINES) + "\n")
         print(f"运行日志已保存: {path}")
