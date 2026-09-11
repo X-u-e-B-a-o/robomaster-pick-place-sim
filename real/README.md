@@ -113,6 +113,32 @@ close with a given power — use it to spot-check behavior.
 `real/gripper_status_sweep.py` runs the full power sweep and saves the log
 plus summary to `~/Desktop/gripper_sweep_<label>_<timestamp>.txt`.
 
+## 云台摄像头实时显示 (camera_viewer.py)
+
+机器人自带云台摄像头 + 板子接显示器, 实时弹窗看画面。
+
+One-time setup (板子上, 需联网):
+
+    python3 -m pip install --user av        # PyAV, H264 解码
+    # 再把 libmedia_codec 空壳换成真解码器 (备份旧文件):
+    cd ~/.local/lib/python3.10/site-packages
+    cp libmedia_codec.py libmedia_codec.py.stub_bak
+    cp ~/colcon_ws/src/robomaster_pick_place_sim/real/libmedia_codec_real.py \
+       libmedia_codec.py
+
+官方 SDK 在 aarch64 上没有 `libmedia_codec` 的 .so, 之前的空壳只保证
+非视频功能可用; 视频流需要 PyAV 版 H264Decoder (接口与官方一致:
+`decode(data) -> [(rgb_bytes, w, h, ls), ...]`)。
+
+Run (板子已连机器人热点、已接显示器):
+
+    cd ~/colcon_ws/src/robomaster_pick_place_sim
+    python3 real/camera_viewer.py            # 默认 720p
+    python3 real/camera_viewer.py 360p       # 卡顿就用低分辨率
+
+会弹出 `RoboMaster LiveView` 窗口, Ctrl+C 退出。注意: 机器人摄像头
+同一时间只能被一路占用, 如果手机 APP 开着图传, 先关掉。
+
 If grasp succeeds:
 - robot shows SUCCESS: armor LEDs solid green + success sound
 - per-run status published to `/real_pick_place/status` as `SUCCESS: ...`
