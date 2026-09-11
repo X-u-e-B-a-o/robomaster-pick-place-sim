@@ -20,6 +20,7 @@ setup(
             'pick_place_moveit = robomaster_pick_place_sim.pick_place_moveit:main',
             'calibrate_pose = robomaster_pick_place_sim.calibrate_pose:main',
             'test_joints = robomaster_pick_place_sim.test_joints:main',
+            'continuous_grasp = robomaster_pick_place_sim.continuous_grasp:main',
         ],
     },
     install_requires=['setuptools'],
