@@ -4,10 +4,11 @@
 适用模型: robomaster_ep_static_gripper_fixed_20260910_122551
 
 安全策略:
-1. Gazebo 始终保持暂停，只通过 world control 服务单步推进。
-2. 读取当前关节状态并用临时 forward controller 原位保持全部位置关节。
+1. 仅在加载控制器时保持 Gazebo 暂停并执行少量启动单步。
+2. 控制器锁定全部关节后解除暂停，按 /joint_states 时间戳连续执行。
 3. 只按动作需要改变主机械臂、夹爪根关节和四个轮关节。
-4. 临时控制器参数写到 /tmp；不读写 URDF、SDF 或模型目录。
+4. 结束或异常时先停止车轮、保持关节，再重新暂停 Gazebo。
+5. 临时控制器参数写到 /tmp；不读写 URDF、SDF 或模型目录。
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from std_msgs.msg import Float64MultiArray, String
 
 
 WORLD_CONTROL_SERVICE = "/world/pick_place/control"
-ACTION_VERSION = "2026-09-10-slender-high-friction-v9"
+ACTION_VERSION = "2026-09-11-continuous-joint-clock-v12"
 BROADCASTER = "joint_state_broadcaster"
 HOLD_CONTROLLER = "robomaster_position_hold_controller"
 HOLD_TOPIC = f"/{HOLD_CONTROLLER}/commands"
@@ -91,7 +92,7 @@ class GraspCubeAction(Node):
         self.declare_parameter("open_offset", 0.70)
         # 闭合时回到已经调好的标定角，不再额外向内压，避免穿模。
         self.declare_parameter("close_offset", 0.00)
-        self.declare_parameter("run_count", 1)
+        self.declare_parameter("run_count", 5)
         self.declare_parameter("spawn_test_cube", True)
         self.declare_parameter("cube_name", "grasp_test_cube")
         self.declare_parameter("cube_length", 0.05)
@@ -104,15 +105,12 @@ class GraspCubeAction(Node):
         self.declare_parameter("cube_y", 0.0)
         # 12 cm 高柱体的中心位于 6 cm 处，另加 1 mm 离地余量。
         self.declare_parameter("cube_z", 0.061)
-        # 原来每段动作 30 帧、共 750 个仿真步，实测约 15 秒。
-        # 改为 6 帧、共 150 步，动作速度提高约 5 倍。
-        self.declare_parameter("motion_frames", 6)
-        self.declare_parameter("steps_per_frame", 25)
-        # 夹爪单独使用更细、更慢的插值，防止夹紧冲击把方块挤出去。
-        self.declare_parameter("gripper_motion_frames", 20)
-        self.declare_parameter("gripper_steps_per_frame", 10)
-        self.declare_parameter("gripper_settle_steps", 150)
-        self.declare_parameter("settle_steps", 25)
+        # 正式动作按仿真时间连续插值，不再为每一帧调用 Gazebo 单步服务。
+        self.declare_parameter("command_rate_hz", 30.0)
+        self.declare_parameter("motion_duration_seconds", 1.5)
+        self.declare_parameter("gripper_duration_seconds", 2.0)
+        self.declare_parameter("settle_duration_seconds", 0.35)
+        self.declare_parameter("gripper_settle_seconds", 0.75)
         self.declare_parameter("cycle_pause_seconds", 0.5)
         # arm_1_joint 的模型上限为 1.384 rad；1.38 rad 是本动作的
         # 最低位置，仅保留约 0.004 rad 防止浮点误差越过硬限位。
@@ -124,12 +122,11 @@ class GraspCubeAction(Node):
         self.declare_parameter("arm_lift_delta", 0.95)
         self.declare_parameter("arm_2_delta", -1.38)
         self.declare_parameter("wheel_speed", 3.0)
-        # 实测 2100 步明显过转，因此按 1050 步校准约 180 度。
-        # 拆成短请求可避免单次 2100 步导致 Ignition service 超时。
+        # 实测 1050 个 0.001 s 仿真步约为 180 度；连续模式换算为 1.05 s。
         self.declare_parameter("turn_steps", 1050)
-        self.declare_parameter("turn_chunk_steps", 150)
+        self.declare_parameter("physics_step_seconds", 0.001)
+        self.declare_parameter("post_turn_settle_seconds", 0.30)
         self.declare_parameter("world_service_timeout_ms", 15000)
-        self.declare_parameter("turn_service_timeout_ms", 30000)
         self.declare_parameter("step_retries", 2)
         self.declare_parameter("stop_on_empty_grasp", True)
         self.declare_parameter("grasp_position_tolerance", 0.02)
@@ -152,18 +149,21 @@ class GraspCubeAction(Node):
         self.cube_x = float(self.get_parameter("cube_x").value)
         self.cube_y = float(self.get_parameter("cube_y").value)
         self.cube_z = float(self.get_parameter("cube_z").value)
-        self.motion_frames = int(self.get_parameter("motion_frames").value)
-        self.steps_per_frame = int(self.get_parameter("steps_per_frame").value)
-        self.gripper_motion_frames = int(
-            self.get_parameter("gripper_motion_frames").value
+        self.command_rate_hz = float(
+            self.get_parameter("command_rate_hz").value
         )
-        self.gripper_steps_per_frame = int(
-            self.get_parameter("gripper_steps_per_frame").value
+        self.motion_duration = float(
+            self.get_parameter("motion_duration_seconds").value
         )
-        self.gripper_settle_steps = int(
-            self.get_parameter("gripper_settle_steps").value
+        self.gripper_duration = float(
+            self.get_parameter("gripper_duration_seconds").value
         )
-        self.settle_steps = int(self.get_parameter("settle_steps").value)
+        self.settle_duration = float(
+            self.get_parameter("settle_duration_seconds").value
+        )
+        self.gripper_settle_duration = float(
+            self.get_parameter("gripper_settle_seconds").value
+        )
         self.cycle_pause_seconds = float(
             self.get_parameter("cycle_pause_seconds").value
         )
@@ -186,14 +186,14 @@ class GraspCubeAction(Node):
         self.arm_2_delta = float(self.get_parameter("arm_2_delta").value)
         self.wheel_speed = float(self.get_parameter("wheel_speed").value)
         self.turn_steps = int(self.get_parameter("turn_steps").value)
-        self.turn_chunk_steps = int(
-            self.get_parameter("turn_chunk_steps").value
+        self.physics_step_seconds = float(
+            self.get_parameter("physics_step_seconds").value
+        )
+        self.post_turn_settle_duration = float(
+            self.get_parameter("post_turn_settle_seconds").value
         )
         self.world_service_timeout_ms = int(
             self.get_parameter("world_service_timeout_ms").value
-        )
-        self.turn_service_timeout_ms = int(
-            self.get_parameter("turn_service_timeout_ms").value
         )
         self.step_retries = int(self.get_parameter("step_retries").value)
         self.stop_on_empty_grasp = bool(
@@ -222,16 +222,15 @@ class GraspCubeAction(Node):
                 "cube_name 只能包含字母、数字、下划线和连字符"
             )
         if min(
-            self.motion_frames,
-            self.steps_per_frame,
-            self.gripper_motion_frames,
-            self.gripper_steps_per_frame,
-            self.gripper_settle_steps,
-            self.settle_steps,
-        ) < 1:
-            raise GraspActionError(
-                "动作、夹爪和停稳步数参数必须大于零"
-            )
+            self.command_rate_hz,
+            self.motion_duration,
+            self.gripper_duration,
+            self.settle_duration,
+            self.gripper_settle_duration,
+            self.physics_step_seconds,
+            self.post_turn_settle_duration,
+        ) <= 0.0:
+            raise GraspActionError("连续动作频率、持续时间和仿真步长必须大于零")
         fractions = (
             self.arm_initial_fraction,
             self.arm_alignment_fraction,
@@ -249,23 +248,21 @@ class GraspCubeAction(Node):
             raise GraspActionError(
                 "机械臂参数必须满足 extend >= test_lift >= main_lift"
             )
-        if self.turn_steps < 1 or self.turn_chunk_steps < 1:
-            raise GraspActionError("turn_steps 和 turn_chunk_steps 必须大于零")
+        if self.turn_steps < 1:
+            raise GraspActionError("turn_steps 必须大于零")
         if (
-            min(
-                self.world_service_timeout_ms,
-                self.turn_service_timeout_ms,
-            )
-            < 1000
+            self.world_service_timeout_ms < 1000
             or self.step_retries < 1
         ):
             raise GraspActionError(
-                "world/turn service timeout 至少为 1000，"
+                "world service timeout 至少为 1000，"
                 "step_retries 至少为 1"
             )
 
         self.latest_joint_state = None
+        self.latest_sim_time = None
         self.last_position_command = None
+        self.world_running = False
         self.create_subscription(
             JointState,
             "/joint_states",
@@ -284,6 +281,10 @@ class GraspCubeAction(Node):
 
     def _joint_state_callback(self, message):
         self.latest_joint_state = message
+        self.latest_sim_time = (
+            float(message.header.stamp.sec)
+            + float(message.header.stamp.nanosec) * 1.0e-9
+        )
 
     def _run(self, command, check=True, timeout=30.0, log=True):
         if log:
@@ -322,6 +323,7 @@ class GraspCubeAction(Node):
         return states
 
     def _step(self, count, allow_retry=True, timeout_ms=None):
+        """仅用于暂停状态下加载控制器的启动单步。"""
         attempts = self.step_retries if allow_retry else 1
         request_timeout_ms = (
             self.world_service_timeout_ms
@@ -364,6 +366,91 @@ class GraspCubeAction(Node):
 
         raise GraspActionError(
             f"Gazebo 单步服务连续 {attempts} 次未成功：{last_output}"
+        )
+
+    def _set_world_paused(self, paused):
+        command = [
+            "ign",
+            "service",
+            "-s",
+            WORLD_CONTROL_SERVICE,
+            "--reqtype",
+            "ignition.msgs.WorldControl",
+            "--reptype",
+            "ignition.msgs.Boolean",
+            "--timeout",
+            str(self.world_service_timeout_ms),
+            "--req",
+            f"pause: {'true' if paused else 'false'}",
+        ]
+        try:
+            result = self._run(
+                command,
+                check=False,
+                timeout=self.world_service_timeout_ms / 1000.0 + 5.0,
+                log=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise GraspActionError(
+                "暂停 Gazebo 超时" if paused else "解除 Gazebo 暂停超时"
+            ) from error
+        if result.returncode != 0 or "data: true" not in result.stdout.lower():
+            raise GraspActionError(
+                ("暂停" if paused else "解除暂停")
+                + f" Gazebo 失败：{result.stdout.strip()}"
+            )
+        self.world_running = not paused
+        self.get_logger().info(
+            "Gazebo 已暂停" if paused else "Gazebo 已进入连续运行模式"
+        )
+
+    def _wait_for_sim_time(self, after=None, timeout_seconds=10.0):
+        deadline = time.monotonic() + timeout_seconds
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.10)
+            current = self.latest_sim_time
+            if current is None:
+                continue
+            if after is None or current > after + 1.0e-9:
+                return current
+        raise GraspActionError(
+            "连续模式下 /joint_states 时间戳未更新，"
+            "请确认 Gazebo 已解除暂停且 broadcaster 为 active"
+        )
+
+    def _wait_sim_duration(self, duration_seconds, callback=None):
+        duration = float(duration_seconds)
+        if duration <= 0.0:
+            if callback is not None:
+                callback(1.0)
+            return
+
+        start = self._wait_for_sim_time(after=self.latest_sim_time)
+        deadline = time.monotonic() + max(30.0, duration * 50.0)
+        next_command_time = start
+        command_period = 1.0 / self.command_rate_hz
+        if callback is not None:
+            callback(0.0)
+
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=min(0.05, command_period))
+            current = self.latest_sim_time
+            if current is None:
+                continue
+            elapsed = max(0.0, current - start)
+            if elapsed >= duration:
+                if callback is not None:
+                    callback(1.0)
+                return
+            if callback is not None and current >= next_command_time:
+                callback(elapsed / duration)
+                next_command_time = current + command_period
+
+        if not rclpy.ok():
+            raise KeyboardInterrupt
+        raise GraspActionError(
+            f"等待 {duration:.2f} 秒仿真时间超时，"
+            "/joint_states 时间戳可能已经停止"
         )
 
     def _activate_with_steps(self, controller):
@@ -597,37 +684,44 @@ class GraspCubeAction(Node):
         self._publish_to(self.command_publisher, positions, repeat)
 
     def safe_stop(self):
-        """发生完成、中断或异常时停止车轮并保持最后的机械臂姿态。"""
+        """停止车轮、保持机械臂，然后重新暂停连续运行的 Gazebo。"""
         if not rclpy.ok():
             return
         try:
             self._publish_to(self.wheel_publisher, [0.0] * 4, repeat=10)
             if self.last_position_command is not None:
                 self._publish(self.last_position_command, repeat=10)
-            # 服务存在时推进少量仿真步，让零速指令真正写入硬件接口。
-            if shutil.which("ign") is not None:
-                self._step(20)
+            if self.world_running:
+                self._wait_sim_duration(0.15)
         except Exception as error:
-            self.get_logger().warning(f"安全停止未完全执行：{error}")
+            self.get_logger().warning(f"零速和关节保持确认未完全执行：{error}")
+        finally:
+            if self.world_running and shutil.which("ign") is not None:
+                try:
+                    self._set_world_paused(True)
+                except Exception as error:
+                    self.get_logger().warning(f"Gazebo 最终暂停失败：{error}")
 
-    def _move_interpolated(self, label, start, target, frames, steps_per_frame):
+    def _move_interpolated(self, label, start, target, duration_seconds):
         self.get_logger().info(label)
-        for frame in range(1, frames + 1):
-            ratio = frame / frames
+        def publish_at(ratio):
+            # 三次平滑插值让起点和终点速度均为零，减少夹取冲击。
+            blend = ratio * ratio * (3.0 - 2.0 * ratio)
             command = [
-                begin + (end - begin) * ratio
+                begin + (end - begin) * blend
                 for begin, end in zip(start, target)
             ]
-            self._publish(command)
-            self._step(steps_per_frame)
+            self._publish(command, repeat=1)
+
+        self._wait_sim_duration(duration_seconds, callback=publish_at)
+        self._publish(target, repeat=3)
 
     def _move(self, label, start, target):
         self._move_interpolated(
             label,
             start,
             target,
-            self.motion_frames,
-            self.steps_per_frame,
+            self.motion_duration,
         )
 
     def _move_gripper(self, label, start, target):
@@ -635,8 +729,7 @@ class GraspCubeAction(Node):
             label,
             start,
             target,
-            self.gripper_motion_frames,
-            self.gripper_steps_per_frame,
+            self.gripper_duration,
         )
 
     def _publish_status(self, text):
@@ -736,9 +829,14 @@ class GraspCubeAction(Node):
             f"RUN {attempt}/{self.run_count} | STEP {number}: {label}"
         )
 
-    def _settle(self, held_positions, steps=None):
+    def _settle(self, held_positions, duration_seconds=None):
         self._publish(held_positions, repeat=5)
-        self._step(self.settle_steps if steps is None else int(steps))
+        duration = (
+            self.settle_duration
+            if duration_seconds is None
+            else float(duration_seconds)
+        )
+        self._wait_sim_duration(duration)
 
     def _arm_pose(self, initial, fraction):
         index = {name: i for i, name in enumerate(POSITION_JOINTS)}
@@ -806,39 +904,26 @@ class GraspCubeAction(Node):
             -self.wheel_speed,
             self.wheel_speed,
         ]
-        remaining = self.turn_steps
+        turn_duration = self.turn_steps * self.physics_step_seconds
         self.get_logger().info(
-            f"小车开始原地旋转：轮速 {self.wheel_speed:.2f} rad/s，"
-            f"仿真步数 {self.turn_steps}"
+            f"小车开始连续原地旋转：轮速 {self.wheel_speed:.2f} rad/s，"
+            f"仿真时间 {turn_duration:.3f} s（原标定 {self.turn_steps} 步）"
         )
         try:
-            while remaining > 0:
-                chunk = min(remaining, self.turn_chunk_steps)
-                self._publish(held_positions)
-                self._publish_to(self.wheel_publisher, wheel_command)
-                # 转向步数直接决定角度；超时时不自动重试，避免一次请求
-                # 已执行却因回复丢失而重复转向。
-                self._step(
-                    chunk,
-                    allow_retry=False,
-                    timeout_ms=self.turn_service_timeout_ms,
+            def keep_turning(ratio):
+                if ratio >= 1.0:
+                    return
+                self._publish(held_positions, repeat=1)
+                self._publish_to(
+                    self.wheel_publisher, wheel_command, repeat=1
                 )
-                remaining -= chunk
-                completed = self.turn_steps - remaining
-                self.get_logger().info(
-                    f"转向进度：{completed}/{self.turn_steps} 仿真步"
-                )
+
+            self._wait_sim_duration(turn_duration, callback=keep_turning)
         finally:
             # 无论转向成功、超时还是 Ctrl+C，都先写入零轮速。
             self._publish_to(self.wheel_publisher, [0.0] * 4, repeat=10)
             self._publish(held_positions, repeat=10)
-            try:
-                self._step(20)
-            except Exception as error:
-                self.get_logger().warning(
-                    f"转向结束后的零速确认未完成：{error}"
-                )
-        self._step(80)
+        self._wait_sim_duration(self.post_turn_settle_duration)
         self.get_logger().info("小车旋转结束，车轮已停止")
 
     def _run_once(self, attempt, initial, current, index):
@@ -901,7 +986,7 @@ class GraspCubeAction(Node):
             grasp_open, initial, index, opened=False
         )
         self._move_gripper("缓慢闭合夹爪", grasp_open, grasp_closed)
-        self._settle(grasp_closed, self.gripper_settle_steps)
+        self._settle(grasp_closed, self.gripper_settle_duration)
 
         self._report_step(attempt, 10, "CHECK GRIPPER CLOSED ANGLE / STATUS")
         if self.stop_on_empty_grasp and self._is_fully_closed(
@@ -977,16 +1062,15 @@ class GraspCubeAction(Node):
 
         self.get_logger().info(
             f"ACTION VERSION: {ACTION_VERSION} | "
-            f"motion={self.motion_frames}x{self.steps_per_frame} steps | "
-            f"gripper={self.gripper_motion_frames}x"
-            f"{self.gripper_steps_per_frame} steps | "
+            f"continuous={self.command_rate_hz:.0f} Hz | "
+            f"motion={self.motion_duration:.2f} s | "
+            f"gripper={self.gripper_duration:.2f} s | "
             f"open={self.open_offset:.2f} rad | "
             f"lowest={self.arm_extend_delta:.2f} rad | "
             f"block={self.cube_length:.2f}x{self.cube_width:.2f}x"
             f"{self.cube_height:.2f} m/{self.cube_mass:.2f} kg/"
             f"mu={self.cube_friction:.1f} | "
-            f"turn={self.turn_steps} steps in chunks of "
-            f"{self.turn_chunk_steps}"
+            f"turn={self.turn_steps * self.physics_step_seconds:.3f} s"
         )
         self.get_logger().info("准备 1/2：激活只读关节状态")
         self._ensure_broadcaster()
@@ -995,6 +1079,13 @@ class GraspCubeAction(Node):
         self.get_logger().info("准备 2/2：原位锁定全部位置关节并启用车轮控制")
         self._ensure_hold_controller(initial)
         self._ensure_wheel_controller()
+
+        self._publish(initial, repeat=10)
+        self._publish_to(self.wheel_publisher, [0.0] * 4, repeat=10)
+        previous_sim_time = self.latest_sim_time
+        self._publish_status("PREP: START CONTINUOUS GAZEBO EXECUTION")
+        self._set_world_paused(False)
+        self._wait_for_sim_time(after=previous_sim_time)
 
         index = {name: i for i, name in enumerate(POSITION_JOINTS)}
         self._publish_status("PREP: OPEN GRIPPER BEFORE ALL STEPS")
@@ -1005,8 +1096,9 @@ class GraspCubeAction(Node):
         self._settle(startup_open)
 
         if self.spawn_test_cube:
-            self._publish_status("PREP: CREATE SMALL TEST CUBE")
+            self._publish_status("PREP: CREATE SLENDER TEST BLOCK")
             self._spawn_cube()
+            self._settle(startup_open)
 
         current = list(startup_open)
         success_count = 0
@@ -1026,7 +1118,7 @@ class GraspCubeAction(Node):
                     f"Run {attempt} success. Next run starts in "
                     f"{self.cycle_pause_seconds:.1f} seconds"
                 )
-                time.sleep(self.cycle_pause_seconds)
+                self._wait_sim_duration(self.cycle_pause_seconds)
 
         self._publish_status(
             f"FINAL RESULT | success: {success_count} | failed: "
@@ -1035,7 +1127,7 @@ class GraspCubeAction(Node):
         if success_count == self.run_count:
             self._publish_status(
                 "Five-run transport task finished; chassis keeps final heading, "
-                "Gazebo remains paused"
+                "Gazebo will pause after the safety stop"
             )
 
 
