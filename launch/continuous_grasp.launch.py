@@ -12,6 +12,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -25,6 +26,7 @@ def generate_launch_description():
 
     params_file = LaunchConfiguration("params_file")
     log_dir = LaunchConfiguration("log_dir")
+    speed_scale = LaunchConfiguration("speed_scale")
     start_simulator = LaunchConfiguration("start_simulator")
 
     return LaunchDescription([
@@ -37,6 +39,11 @@ def generate_launch_description():
             "log_dir",
             default_value="/home/nvidia/ros2_actions/logs",
             description="Directory for console and ROS 2 launch logs",
+        ),
+        DeclareLaunchArgument(
+            "speed_scale",
+            default_value="4.0",
+            description="Overall motion speed multiplier from 1.0 to 5.0",
         ),
         DeclareLaunchArgument(
             "start_simulator",
@@ -72,7 +79,16 @@ def generate_launch_description():
                     package="robomaster_pick_place_sim",
                     executable="continuous_grasp",
                     name="grasp_cube_action",
-                    parameters=[params_file, {"log_dir": log_dir}],
+                    parameters=[
+                        params_file,
+                        {
+                            "log_dir": log_dir,
+                            "speed_scale": ParameterValue(
+                                speed_scale,
+                                value_type=float,
+                            ),
+                        },
+                    ],
                     output="both",
                     emulate_tty=True,
                 )

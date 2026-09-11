@@ -31,7 +31,7 @@ from std_msgs.msg import Float64MultiArray, String
 
 
 WORLD_CONTROL_SERVICE = "/world/pick_place/control"
-ACTION_VERSION = "2026-09-11-ros2-launch-logging-v13"
+ACTION_VERSION = "2026-09-11-four-times-speed-v14"
 BROADCASTER = "joint_state_broadcaster"
 HOLD_CONTROLLER = "robomaster_position_hold_controller"
 HOLD_TOPIC = f"/{HOLD_CONTROLLER}/commands"
@@ -147,7 +147,9 @@ class GraspCubeAction(Node):
         # 12 cm 高柱体的中心位于 6 cm 处，另加 1 mm 离地余量。
         self.declare_parameter("cube_z", 0.061)
         # 正式动作按仿真时间连续插值，不再为每一帧调用 Gazebo 单步服务。
-        self.declare_parameter("command_rate_hz", 30.0)
+        # 1.0 为原实测速度；默认 4.0，可在 1.0～5.0 之间调整。
+        self.declare_parameter("speed_scale", 4.0)
+        self.declare_parameter("command_rate_hz", 100.0)
         self.declare_parameter("motion_duration_seconds", 1.5)
         self.declare_parameter("gripper_duration_seconds", 2.0)
         self.declare_parameter("settle_duration_seconds", 0.35)
@@ -190,24 +192,27 @@ class GraspCubeAction(Node):
         self.cube_x = float(self.get_parameter("cube_x").value)
         self.cube_y = float(self.get_parameter("cube_y").value)
         self.cube_z = float(self.get_parameter("cube_z").value)
+        self.speed_scale = float(self.get_parameter("speed_scale").value)
+        if not 1.0 <= self.speed_scale <= 5.0:
+            raise GraspActionError("speed_scale 必须在 1.0～5.0 之间")
         self.command_rate_hz = float(
             self.get_parameter("command_rate_hz").value
         )
         self.motion_duration = float(
             self.get_parameter("motion_duration_seconds").value
-        )
+        ) / self.speed_scale
         self.gripper_duration = float(
             self.get_parameter("gripper_duration_seconds").value
-        )
+        ) / self.speed_scale
         self.settle_duration = float(
             self.get_parameter("settle_duration_seconds").value
-        )
+        ) / self.speed_scale
         self.gripper_settle_duration = float(
             self.get_parameter("gripper_settle_seconds").value
-        )
+        ) / self.speed_scale
         self.cycle_pause_seconds = float(
             self.get_parameter("cycle_pause_seconds").value
-        )
+        ) / self.speed_scale
         self.arm_extend_delta = float(
             self.get_parameter("arm_extend_delta").value
         )
@@ -225,14 +230,17 @@ class GraspCubeAction(Node):
         )
         self.arm_lift_delta = float(self.get_parameter("arm_lift_delta").value)
         self.arm_2_delta = float(self.get_parameter("arm_2_delta").value)
-        self.wheel_speed = float(self.get_parameter("wheel_speed").value)
+        self.wheel_speed = (
+            float(self.get_parameter("wheel_speed").value)
+            * self.speed_scale
+        )
         self.turn_steps = int(self.get_parameter("turn_steps").value)
         self.physics_step_seconds = float(
             self.get_parameter("physics_step_seconds").value
         )
         self.post_turn_settle_duration = float(
             self.get_parameter("post_turn_settle_seconds").value
-        )
+        ) / self.speed_scale
         self.world_service_timeout_ms = int(
             self.get_parameter("world_service_timeout_ms").value
         )
@@ -978,7 +986,11 @@ class GraspCubeAction(Node):
             -self.wheel_speed,
             self.wheel_speed,
         ]
-        turn_duration = self.turn_steps * self.physics_step_seconds
+        turn_duration = (
+            self.turn_steps
+            * self.physics_step_seconds
+            / self.speed_scale
+        )
         self.get_logger().info(
             f"小车开始连续原地旋转：轮速 {self.wheel_speed:.2f} rad/s，"
             f"仿真时间 {turn_duration:.3f} s（原标定 {self.turn_steps} 步）"
@@ -1136,6 +1148,7 @@ class GraspCubeAction(Node):
 
         self.get_logger().info(
             f"ACTION VERSION: {ACTION_VERSION} | "
+            f"speed={self.speed_scale:.1f}x | "
             f"continuous={self.command_rate_hz:.0f} Hz | "
             f"motion={self.motion_duration:.2f} s | "
             f"gripper={self.gripper_duration:.2f} s | "
@@ -1144,7 +1157,7 @@ class GraspCubeAction(Node):
             f"block={self.cube_length:.2f}x{self.cube_width:.2f}x"
             f"{self.cube_height:.2f} m/{self.cube_mass:.2f} kg/"
             f"mu={self.cube_friction:.1f} | "
-            f"turn={self.turn_steps * self.physics_step_seconds:.3f} s"
+            f"turn={self.turn_steps * self.physics_step_seconds / self.speed_scale:.3f} s"
         )
         self.get_logger().info("准备 1/2：激活只读关节状态")
         self._ensure_broadcaster()
