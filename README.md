@@ -4,6 +4,8 @@
 
 **机器人集成小组项目Ⅰ｜机械臂定点抓取实验**
 
+> 本 README 采用 GitHub 原生 Markdown 语法。公式使用纯文本代码块表示，以避免不同浏览器或 GitHub 数学渲染设置造成 LaTeX 字符直接显示。
+
 项目仓库：
 
 ```text
@@ -63,16 +65,11 @@ Home
 
 因此：
 
-\[
-N_{\mathrm{success}}\geq 4,\qquad N_{\mathrm{trial}}=5
-\]
-
-\[
-\mathrm{SuccessRate}
-=
-\frac{N_{\mathrm{success}}}{5}\times100\%
-\geq80\%
-\]
+```text
+N_success ≥ 4
+N_trial = 5
+SuccessRate = (N_success / 5) × 100% ≥ 80%
+```
 
 此外，系统需要满足：
 
@@ -456,41 +453,35 @@ Cartesian Target
 
 对于目标：
 
-\[
-P=(x,y,z)
-\]
+```text
+P = (x, y, z)
+```
 
 水平径向距离为：
 
-\[
-r=\sqrt{x^2+y^2}
-\]
+```text
+r = sqrt(x² + y²)
+```
 
 底座偏航角为：
 
-\[
-\theta=\operatorname{atan2}(y,x)
-\]
+```text
+θ = atan2(y, x)
+```
 
 相对肩关节：
 
-\[
-d_x=r-x_s
-\]
-
-\[
-d_z=z-z_s
-\]
-
-\[
-d=\sqrt{d_x^2+d_z^2}
-\]
+```text
+d_x = r - x_s
+d_z = z - z_s
+d = sqrt(d_x² + d_z²)
+```
 
 可达条件：
 
-\[
-|L_1-L_2|\le d\le L_1+L_2
-\]
+```text
+|L1 - L2| ≤ d ≤ L1 + L2
+```
 
 程序同时检查：
 
@@ -828,29 +819,17 @@ RoboMaster EP 实际机械臂的运动结构不同于仿真中的 3-DOF 模型�
 
 仿真 FK：
 
-\[
-x_s =
-x_0+
-L_1\cos q_1+
-L_2\cos(q_1+q_2)
-\]
-
-\[
-z_s =
-z_0-
-L_1\sin q_1-
-L_2\sin(q_1+q_2)
-\]
+```text
+x_s = x_0 + L1·cos(q1) + L2·cos(q1 + q2)
+z_s = z_0 - L1·sin(q1) - L2·sin(q1 + q2)
+```
 
 标定后映射：
 
-\[
-x_r=k_xx_s+b_x
-\]
-
-\[
-y_r=k_zz_s+b_z
-\]
+```text
+x_r = k_x · x_s + b_x
+y_r = k_z · z_s + b_z
+```
 
 最后通过 RoboMaster SDK：
 
@@ -874,13 +853,10 @@ robotic_arm.moveto(x, y)
 
 对应示例映射：
 
-\[
-x_r = 2750x_s-1590
-\]
-
-\[
-y_r \approx 666.67z_s-173.33
-\]
+```text
+x_r = 2750 · x_s - 1590
+y_r ≈ 666.67 · z_s - 173.33
+```
 
 这些值仅是仓库中的默认标定关系。正式真机实验应使用现场标定得到的 `anchor1_real`、`anchor2_real` 和 `home_real`。
 
